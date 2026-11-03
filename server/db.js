@@ -1,0 +1,80 @@
+'use strict';
+/* Persistence on Node's built-in SQLite.
+   Most records are documents (JSON) with indexed columns for tenant scoping
+   (merchant_id), test/live separation (mode), status and a lookup key (k).
+   Money moves only through the relational, append-only ledger (ledger.js). */
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const path = require('node:path');
+const config = require('./config');
+
+fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+const db = new DatabaseSync(config.dbPath);
+db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+
+const DOCS = ['merchants', 'users', 'sessions', 'api_keys', 'checkout_sessions', 'payments', 'refunds', 'disputes', 'payouts', 'links', 'wallets', 'banks',
+  'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit'];
+const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events']);
+for (const t of DOCS) {
+  db.exec(`CREATE TABLE IF NOT EXISTS ${t} (id TEXT PRIMARY KEY, merchant_id TEXT, mode TEXT, status TEXT, k TEXT, created_at INTEGER NOT NULL, doc TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS ${t}_scope ON ${t}(merchant_id, mode, created_at);
+    CREATE INDEX IF NOT EXISTS ${t}_status ON ${t}(status, created_at);
+    CREATE ${UNIQUE_K.has(t) ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${t}_k ON ${t}(k);`);
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS journals (key TEXT PRIMARY KEY, mode TEXT NOT NULL, ref TEXT, memo TEXT, at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, journal_key TEXT NOT NULL REFERENCES journals(key), mode TEXT NOT NULL, account TEXT NOT NULL,
+    merchant_id TEXT, currency TEXT NOT NULL, amount INTEGER NOT NULL, ref TEXT, at INTEGER NOT NULL);
+  CREATE INDEX IF NOT EXISTS ledger_m ON ledger(merchant_id, mode, account, currency);
+  CREATE INDEX IF NOT EXISTS ledger_ref ON ledger(ref);
+  CREATE TABLE IF NOT EXISTS idempotency (merchant_id TEXT NOT NULL, mode TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, status INTEGER, response TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (merchant_id, mode, key));
+  CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  CREATE TRIGGER IF NOT EXISTS ledger_no_update BEFORE UPDATE ON ledger BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
+  CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger BEGIN SELECT RAISE(ABORT, 'ledger is append-only'); END;
+`);
+
+const parse = row => row ? JSON.parse(row.doc) : null;
+
+function put(table, obj) {
+  obj.created_at ??= Date.now();
+  db.prepare(`INSERT INTO ${table} (id, merchant_id, mode, status, k, created_at, doc) VALUES (?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET merchant_id=excluded.merchant_id, mode=excluded.mode, status=excluded.status, k=excluded.k, doc=excluded.doc`)
+    .run(obj.id, obj.merchant_id ?? null, obj.mode ?? null, obj.status ?? null, obj.k ?? null, obj.created_at, JSON.stringify(obj));
+  return obj;
+}
+const get = (table, id) => parse(db.prepare(`SELECT doc FROM ${table} WHERE id=?`).get(String(id ?? '')));
+const byKey = (table, k) => parse(db.prepare(`SELECT doc FROM ${table} WHERE k=?`).get(String(k ?? '')));
+const del = (table, id) => db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id);
+
+/** list(table, { merchant_id, mode, status (string|array), since, until, k }, { limit, offset, asc }) */
+function list(table, f = {}, o = {}) {
+  const w = [], p = [];
+  for (const c of ['merchant_id', 'mode', 'k']) if (f[c] !== undefined) { w.push(`${c}=?`); p.push(f[c]); }
+  if (f.status !== undefined) { const s = [].concat(f.status); w.push(`status IN (${s.map(() => '?').join(',')})`); p.push(...s); }
+  if (f.since) { w.push('created_at>=?'); p.push(f.since); }
+  if (f.until) { w.push('created_at<?'); p.push(f.until); }
+  const sql = `SELECT doc FROM ${table}${w.length ? ' WHERE ' + w.join(' AND ') : ''} ORDER BY created_at ${o.asc ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`;
+  return db.prepare(sql).all(...p, o.limit ?? 500, o.offset ?? 0).map(parse);
+}
+function count(table, f = {}) {
+  const w = [], p = [];
+  for (const c of ['merchant_id', 'mode']) if (f[c] !== undefined) { w.push(`${c}=?`); p.push(f[c]); }
+  if (f.status !== undefined) { const s = [].concat(f.status); w.push(`status IN (${s.map(() => '?').join(',')})`); p.push(...s); }
+  if (f.since) { w.push('created_at>=?'); p.push(f.since); }
+  return db.prepare(`SELECT COUNT(*) n FROM ${table}${w.length ? ' WHERE ' + w.join(' AND ') : ''}`).get(...p).n;
+}
+
+let depth = 0;
+/** Run fn inside one transaction; nested calls join the outer transaction. */
+function tx(fn) {
+  if (depth > 0) { depth++; try { return fn(); } finally { depth--; } }
+  db.exec('BEGIN IMMEDIATE'); depth = 1;
+  try { const r = fn(); db.exec('COMMIT'); return r; }
+  catch (e) { db.exec('ROLLBACK'); throw e; }
+  finally { depth = 0; }
+}
+
+function getMeta(key, def) { const r = db.prepare('SELECT value FROM meta WHERE key=?').get(key); return r ? JSON.parse(r.value) : def; }
+function setMeta(key, value) { db.prepare('INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
+
+module.exports = { db, put, get, byKey, del, list, count, tx, getMeta, setMeta };
