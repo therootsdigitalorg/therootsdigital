@@ -140,3 +140,5 @@ The software is ready for sandbox use and pilot integrations. Real money additio
 | 4000 0000 0000 9995 | Insufficient funds |
 
 Any future expiry and any CVC. Sandbox crypto checkout includes a wallet simulator (exact / under / over / wrong network / expiry).
+#   t h e r o o t s d i g i t a l  
+ 
