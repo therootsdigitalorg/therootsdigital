@@ -28,6 +28,8 @@ if (!appKey && !serverless) {
   appKey = fs.readFileSync(keyFile, 'utf8').trim();
 }
 
+// POSTGRES_URL is the pooled address added by the Vercel + Supabase integration.
+const databaseUrl = env('DATABASE_URL') || env('POSTGRES_URL');
 const vercelHost = env('VERCEL_PROJECT_PRODUCTION_URL') || env('VERCEL_URL');
 const publicUrl = (env('PUBLIC_URL') || (vercelHost ? 'https://' + vercelHost : 'http://localhost:' + env('PORT', '3000'))).replace(/\/$/, '');
 
@@ -35,14 +37,14 @@ const publicUrl = (env('PUBLIC_URL') || (vercelHost ? 'https://' + vercelHost : 
 function setupProblems() {
   if (!serverless) return [];
   const missing = [];
-  if (!env('DATABASE_URL')) missing.push('DATABASE_URL');
+  if (!databaseUrl) missing.push('DATABASE_URL');
   if (!/^[0-9a-f]{64}$/i.test(appKey || '')) missing.push('APP_ENCRYPTION_KEY');
   return missing;
 }
 
 module.exports = {
   ROOT, production, serverless, setupProblems,
-  databaseUrl: env('DATABASE_URL'), databaseSsl: env('DATABASE_SSL'), databaseCa: env('DATABASE_CA_CERT').replace(/\\n/g, '\n'),
+  databaseUrl, databaseSsl: env('DATABASE_SSL'), databaseCa: env('DATABASE_CA_CERT').replace(/\\n/g, '\n'),
   cronSecret: env('CRON_SECRET'),
   port: +env('PORT', '3000'),
   publicUrl,
