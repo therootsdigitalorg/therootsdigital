@@ -38,7 +38,7 @@ function merchantBalances(mid, mode) {
 }
 const entriesFor = ref => db.prepare('SELECT l.*, j.memo FROM ledger l JOIN journals j ON j.key=l.journal_key WHERE l.ref=? ORDER BY l.id').all(ref);
 const trialBalance = mode => db.prepare('SELECT currency, SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) debits, -SUM(CASE WHEN amount<0 THEN amount ELSE 0 END) credits FROM ledger WHERE mode=? GROUP BY currency').all(mode);
-const accountTotals = mode => db.prepare('SELECT account, currency, SUM(amount) total FROM ledger WHERE mode=? GROUP BY account, currency HAVING total<>0 ORDER BY account, currency').all(mode);
+const accountTotals = mode => db.prepare('SELECT account, currency, SUM(amount) total FROM ledger WHERE mode=? GROUP BY account, currency HAVING SUM(amount)<>0 ORDER BY account, currency').all(mode);
 const sumAccount = (mode, acct) => Object.fromEntries(db.prepare('SELECT currency, SUM(amount) s FROM ledger WHERE mode=? AND account=? GROUP BY currency').all(mode, acct).map(r => [r.currency, r.s]));
 const recent = (mode, limit = 100, mid) => db.prepare(`SELECT l.*, j.memo FROM ledger l JOIN journals j ON j.key=l.journal_key WHERE l.mode=?${mid ? ' AND l.merchant_id=?' : ''} ORDER BY l.id DESC LIMIT ?`).all(...[mode, mid, limit].filter(v => v !== undefined));
 const journalCount = mode => db.prepare('SELECT COUNT(*) n FROM journals WHERE mode=?').get(mode).n;

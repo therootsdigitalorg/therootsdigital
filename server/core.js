@@ -541,7 +541,7 @@ async function idempotent(mid, mode, key, fingerprint, fn) {
     return { replay: true, status: row.status, body: JSON.parse(row.response) };
   }
   const out = await fn();
-  if ((out.status || 200) < 500) store.db.prepare('INSERT OR IGNORE INTO idempotency (merchant_id, mode, key, fingerprint, status, response, created_at) VALUES (?,?,?,?,?,?,?)').run(mid, mode, key, fingerprint, out.status || 200, JSON.stringify(out.body), now());
+  if ((out.status || 200) < 500) store.db.prepare('INSERT INTO idempotency (merchant_id, mode, key, fingerprint, status, response, created_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT DO NOTHING').run(mid, mode, key, fingerprint, out.status || 200, JSON.stringify(out.body), now());
   return out;
 }
 

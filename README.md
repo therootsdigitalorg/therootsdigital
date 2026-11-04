@@ -9,7 +9,7 @@ merchants, verification, crypto providers, payouts, the ledger and staff access.
 
 ## Quick start
 
-Requires **Node.js 22.13+** (uses Node's built-in SQLite). **No npm install, zero dependencies.**
+Requires **Node.js 22.13+** (local mode uses its built-in SQLite). Run `npm install` for Postgres and Vercel support.
 
 ```bash
 cp .env.example .env      # optional — defaults work locally
@@ -107,6 +107,30 @@ cookies + custom-header CSRF guard; login and 2FA throttling; staff RBAC with ma
 tenant isolation on every query; idempotency for API POSTs, refunds and payouts; journal-key idempotent ledger;
 signature-verified, deduplicated provider webhooks; SSRF guard for merchant webhook URLs; strict CSP; sandbox
 refuses real card numbers; full audit log.
+
+## Deploying on Vercel with Supabase
+
+Locally the app uses SQLite. When `DATABASE_URL` is set it uses Postgres instead, creating its tables on first start in a
+private `digitalhub` schema with row-level security on (Supabase's public REST API cannot read them).
+It uses its own sign-in and a direct database connection, not Supabase Auth or the publishable/secret API keys.
+
+Add these in **Vercel → Project → Settings → Environment Variables**, then redeploy:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Supabase → **Connect** → **Transaction pooler** URI (port 6543), with your database password. URL-encode special characters in it. |
+| `APP_ENCRYPTION_KEY` | 64 hex characters: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Never change it afterwards. |
+| `ADMIN_EMAIL` | Your super admin sign-in email |
+| `ADMIN_PASSWORD` | Your super admin password (10+ characters, letters and numbers) |
+| `CRON_SECRET` | Any long random string; protects the daily background job |
+
+Optional: `PUBLIC_URL` if you use a custom domain, `DATABASE_CA_CERT` for full TLS verification of the database connection.
+Without `DATABASE_CA_CERT` the connection is encrypted but the server certificate is not verified.
+
+**Serverless limits:** background work (settlement, expiries, webhook retries) runs after requests, at most every 20 seconds
+per instance, plus once a day by cron, so an idle site can delay it. Requests that change data run one at a time across
+the platform, which keeps the ledger correct but limits throughput; move to a long-running server before high volume.
+Login throttling is per instance.
 
 ## Going live
 

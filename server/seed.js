@@ -40,6 +40,7 @@ async function ensureSeed() {
   if (store.list('users', {}, { limit: 1 }).length) return;
   const auth = require('./auth');
   const notes = [];
+  if (config.production && !config.adminPassword) throw new U.HttpError(503, 'setup_incomplete', 'Server setup incomplete. Add ADMIN_PASSWORD in Vercel to create the first super admin.');
   const adminPassword = config.adminPassword || genPassword();
   auth.createUser({ email: config.adminEmail, name: 'Platform Owner', password: adminPassword, kind: 'staff', role: 'super_admin' });
   notes.push(`Super admin   ${config.adminEmail}   password: ${config.adminPassword ? '(from ADMIN_PASSWORD)' : adminPassword}`);
@@ -74,7 +75,7 @@ async function ensureSeed() {
   core.audit('system', 'platform.initialized', 'platform', 'First-run setup');
   const text = `Digital Hub — first-run credentials (${new Date().toISOString()})\n\n${notes.join('\n')}\n\nChange these passwords after signing in. Delete this file when done.\n`;
   if (!config.production) fs.writeFileSync(path.join(path.dirname(config.dbPath), 'first-run-credentials.txt'), text, { mode: 0o600 });
-  console.log('\n' + text);
+  if (!config.production) console.log('\n' + text);
 }
 
 module.exports = { ensureSeed, samplePayments };
