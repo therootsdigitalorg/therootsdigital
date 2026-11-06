@@ -24,7 +24,7 @@ require('./routes/checkout').routes(route);
 const PUBLIC = path.join(config.ROOT, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   ...(config.secureCookies ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
@@ -95,7 +95,7 @@ async function handle(req, res) {
   const pathname = decodeURIComponent(url.pathname);
   const isApi = /^\/(v1|auth|m-api|a-api|c-api|hooks|api)\//.test(pathname);
 
-  if (!isApi && req.method === 'GET' && !/^\/(pay|l|downloads)\//.test(pathname)) {
+  if (!isApi && req.method === 'GET' && !/^\/(pay|l|downloads|cashapp-sim)\//.test(pathname)) {
     if (pathname === '/' || pathname === '/app' || pathname === '/admin') return serveStatic(res, path.join(PUBLIC, 'app.html'));
     const file = path.normalize(path.join(PUBLIC, pathname));
     if (!file.startsWith(PUBLIC)) return send(res, 403, 'Forbidden');
@@ -144,7 +144,7 @@ const server = http.createServer(handler);
 /* Serverless has no timers between requests: background work runs after requests, at most every 20s
    per instance, plus the daily Vercel cron as a fallback when the site is idle. */
 let lastJobs = 0;
-const dbJobs = async () => { core.runSandboxConfirmations(); core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); };
+const dbJobs = async () => { await core.runCashAppSync(); core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); };
 const runDbJobs = () => serial(() => store.requestTx(dbJobs));
 function scheduleJobs() {
   if (!config.serverless || Date.now() - lastJobs < 20000) return;
@@ -164,7 +164,7 @@ async function start() {
   // Background jobs: webhook delivery, sandbox confirmations, expiries, settlement.
   const safe = fn => () => Promise.resolve().then(fn).catch(e => console.error('[job]', e.message));
   setInterval(safe(() => core.runDeliveries()), 4000);
-  setInterval(safe(() => core.runSandboxConfirmations()), 3000);
+  setInterval(safe(() => core.runCashAppSync()), 4000);
   setInterval(safe(() => core.runExpiry()), 10000);
   setInterval(safe(() => core.runSettlement('test')), 15000);
   setInterval(safe(() => core.runSettlement('live')), 300000);

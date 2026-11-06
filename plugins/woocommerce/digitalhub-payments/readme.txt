@@ -1,26 +1,30 @@
-=== Digital Hub Payments for WooCommerce ===
+=== Digital Hub – Cash App Pay for WooCommerce ===
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 2.0.0
 License: GPLv2 or later
 
-Accept Visa / Mastercard and USDT / USDC through Digital Hub hosted checkout.
+Accept Cash App Pay through Digital Hub hosted checkout. US merchants, USD store currency.
 
 == Installation ==
 1. Plugins → Add New → Upload Plugin → choose digitalhub-woocommerce.zip → Activate.
-2. WooCommerce → Settings → Payments → Digital Hub → Manage.
+2. WooCommerce → Settings → Payments → Digital Hub – Cash App Pay → Manage.
 3. Digital Hub URL: your platform URL (e.g. https://pay.yourdomain.com).
-4. Paste your test secret key (Digital Hub dashboard → Developers → API keys).
-5. In Digital Hub → Developers → Webhooks, add an endpoint with URL
+4. Paste your test secret key (Digital Hub dashboard → Developers & API → API keys).
+5. In Digital Hub → Developers & API → Webhooks, add an endpoint with URL
    https://YOUR-SHOP/wc-api/digitalhub/  and paste the whsec_… signing secret into the plugin.
-6. Place a test order with card 4242 4242 4242 4242 (any future expiry, any CVC).
+6. In Digital Hub → Settings → Cash App Pay, submit your business details and register with the sandbox.
+7. Place a test order. On the Digital Hub checkout, scan the QR code or open Cash App and approve.
+   Sandbox amounts 77.70–77.76 are declined by Cash App, so you can test failures.
 
 == How it works ==
-* Checkout creates a Digital Hub checkout session (amount and currency fixed server-side, Idempotency-Key per order) and redirects the customer.
-* The order is marked paid only after a signed checkout.session.completed webhook (HMAC-SHA256, 5-minute tolerance) whose amount, currency and session ID match the order. A status check on the thank-you page is a fallback.
-* Refunds issued from the WooCommerce order screen call the Digital Hub refunds API.
+* Checkout creates a Digital Hub checkout session (USD, amount fixed server-side, Idempotency-Key per order) and redirects the customer.
+* Digital Hub creates a Cash App Pay customer request. The customer approves in Cash App, then Digital Hub creates and captures the Cash App payment.
+* The order is marked paid only after the plugin re-reads the session from the Digital Hub API and it reports payment_status "paid" (a captured Cash App payment) with the same order, amount and currency. Webhooks (HMAC-SHA256, 5-minute tolerance) and the thank-you page both trigger this check.
+* Authorized-but-not-captured payments put the order on hold. Declined payments leave it pending so the customer can retry. Expired checkouts cancel the pending order.
+* Refunds issued from the WooCommerce order screen go to Cash App through Digital Hub. Refunds made in Digital Hub are synced back. Cash App disputes are added as order notes.
 * Works with the classic and the block-based checkout.
 
-== Supported currencies ==
-USD, EUR, GBP, AED, PKR.
+== Requirements ==
+Store currency must be USD. Live payments need the merchant to be approved in Digital Hub and registered with Cash App production.

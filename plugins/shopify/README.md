@@ -1,13 +1,13 @@
 # Digital Hub ⇄ Shopify bridge
 
 **Why a bridge?** Shopify only shows third-party payment gateways inside its checkout for apps approved through the
-Shopify Payments Partner programme. Until Digital Hub is approved, this bridge lets a Shopify store take card and
-USDT/USDC payments through Digital Hub with a manual payment method.
+Shopify Payments Partner programme. Until Digital Hub is approved, this bridge lets a Shopify store take Cash App Pay
+payments (US stores, USD) through Digital Hub with a manual payment method.
 
 ## Setup (≈15 minutes)
 
 1. **Shopify admin → Settings → Payments → Manual payment methods → Create custom payment method**
-   Name: `Card or USDT/USDC (Digital Hub)`. Instructions: "After placing your order, use the payment link in your confirmation email."
+   Name: `Cash App Pay (Digital Hub)`. Instructions: "After placing your order, use the payment link in your confirmation email."
 2. **Shopify admin → Settings → Apps → Develop apps → Create app** with Admin API scopes
    `read_orders, write_orders`. Install it and copy the Admin API access token.
 3. **Run the bridge** on any HTTPS host (Render, Fly.io, a VPS…):
@@ -20,7 +20,7 @@ USDT/USDC payments through Digital Hub with a manual payment method.
 5. **Shopify admin → Settings → Notifications → Order confirmation** — add for orders using the manual method:
    ```liquid
    {% if gateway contains 'Digital Hub' and financial_status != 'paid' %}
-     <p><a href="https://YOUR-BRIDGE/pay/{{ id }}?email={{ email | url_encode }}">Pay now by card or USDT/USDC</a></p>
+     <p><a href="https://YOUR-BRIDGE/pay/{{ id }}?email={{ email | url_encode }}">Pay now with Cash App Pay</a></p>
    {% endif %}
    ```
    (Verify variable names against Shopify's current notification template reference.)

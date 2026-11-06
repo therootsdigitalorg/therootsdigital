@@ -1,5 +1,8 @@
 'use strict';
-/* Domain services. Everything that changes money goes through the ledger inside a transaction. */
+/* Domain services for Digital Hub Wallet + Cash App Pay.
+   Money only moves through the double-entry ledger, and only after Cash App confirms the
+   payment, refund or dispute (API response or verified webhook). The wallet records verified
+   payment and settlement activity; Digital Hub does not hold customer funds itself. */
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const config = require('./config');
@@ -7,21 +10,27 @@ const store = require('./db');
 const L = require('./ledger');
 const { ACCT } = L;
 const U = require('./util');
-const { DAY, id, rid, HttpError, bad, convert, toUSD, pct, fmt, FIAT, STABLE, CURRENCIES } = U;
-const P = require('./providers');
+const { DAY, id, rid, HttpError, bad, convert, toUSD, pct, fmt, FIAT, CURRENCIES } = U;
+const CA = require('./cashapp');
 
-const PAID = ['authorized', 'captured', 'settled', 'confirmed', 'overpaid', 'partially_refunded', 'refunded', 'disputed', 'chargeback_lost'];
+const PAID = ['authorized', 'captured', 'settled', 'partially_refunded', 'refunded', 'disputed', 'chargeback_lost'];
+const IN_FLIGHT = ['awaiting_customer', 'processing'];
 const now = () => Date.now();
 const dayMs = mode => mode === 'test' ? config.sandboxDayMs : DAY;
+const CHECKOUT_CURRENCY = 'USD'; // Cash App Pay settles in USD only (Currency enum in the Network API)
 
 /* ---------------- platform settings ---------------- */
 const PLATFORM_DEFAULT = {
-  networksEnabled: Object.fromEntries(Object.keys(P.NETWORKS).map(k => [k, true])),
-  approvalThresholdUSD: 1000000,               // minor units ($10,000)
+  approvalThresholdUSD: 1000000, // minor units ($10,000)
   risk: { declineCount: 3, highValueUSD: 500000 },
-  defaults: { cardPlatPct: 1.0, cryptoPlatPct: 1.0, fxSpreadBps: 25, reservePct: 5, reserveDays: 90 },
+  defaults: { platPct: 1.0, platFixedUSD: 0, reservePct: 5, reserveDays: 90 },
 };
-const platform = () => ({ ...PLATFORM_DEFAULT, ...store.getMeta('platform', {}) });
+function platform() {
+  const s = store.getMeta('platform', {});
+  const d = { ...PLATFORM_DEFAULT.defaults, ...(s.defaults || {}) };
+  if (s.defaults && s.defaults.platPct == null && s.defaults.cardPlatPct != null) d.platPct = s.defaults.cardPlatPct;
+  return { ...PLATFORM_DEFAULT, ...s, defaults: d };
+}
 const setPlatform = v => store.setMeta('platform', { ...platform(), ...v });
 
 /* ---------------- audit, alerts, events ---------------- */
@@ -44,23 +53,38 @@ const publicEvent = e => ({ id: e.id, object: 'event', type: e.type, livemode: e
 /* ---------------- merchants ---------------- */
 function newMerchant({ name, legal_name, country, website, support_email }) {
   const d = platform().defaults;
-  return {
+  return normalizeMerchant({
     id: id('acct'), status: 'pending', name, legal_name, country, website, support_email, mcc: '5999', live_enabled: false, risk: 'medium',
-    perms: { card: true, crypto: true, payouts: true, refunds: true, links: true, api: true },
     limits: { perTxnUSD: 1000000, dailyUSD: 5000000, monthlyUSD: 50000000, refundDailyUSD: 1000000 },
     controls: { velocityPerHour: 10, blockedCountries: [] },
-    fees: { card: { acqPct: 2.2, acqFixedUSD: 20, platPct: d.cardPlatPct }, crypto: { provPct: 0.5, platPct: d.cryptoPlatPct }, fxSpreadBps: d.fxSpreadBps, disputeFeeUSD: 1500 },
-    reserve: { pct: d.reservePct, days: d.reserveDays }, captureMode: 'auto', threeDS: { mode: 'always', riskThreshold: 45, lowValueExemption: true }, non3ds: null,
-    cryptoProvider: 'binance', providers: { card_acquirer: 'not_requested', binance: 'not_requested', coinbase: 'not_requested', soneri: 'not_requested' },
+    fees: { platPct: d.platPct, platFixedUSD: d.platFixedUSD, disputeFeeUSD: 0 },
+    reserve: { pct: d.reservePct, days: d.reserveDays }, captureMode: 'auto',
     settlementHold: null, minPayout: 5000, dualControl: false,
     kyb: { submitted: false, business: {}, owners: [], checks: { registration: false, owners: false, website: false, sanctions: false, bank: false }, aml: { status: 'pending', at: null } },
-  };
+  });
 }
-const merchant = mid => { const m = store.get('merchants', mid); if (!m) throw new HttpError(404, 'not_found', 'Merchant not found'); return m; };
+/** Fills fields added with Cash App Pay so older merchant records keep working. */
+function normalizeMerchant(m) {
+  if (!m) return m;
+  const p = m.perms || {};
+  m.perms = { cashapp: p.cashapp ?? true, payouts: p.payouts ?? true, refunds: p.refunds ?? true, links: p.links ?? true, api: p.api ?? true };
+  const f = m.fees || {};
+  m.fees = { platPct: f.platPct ?? f.card?.platPct ?? 1.0, platFixedUSD: f.platFixedUSD ?? 0, disputeFeeUSD: f.disputeFeeUSD ?? 0 };
+  m.cashapp ||= {};
+  m.cashapp.details ||= null;
+  m.cashapp.test ||= {}; m.cashapp.live ||= {};
+  m.captureMode = m.captureMode === 'manual' ? 'manual' : 'auto';
+  m.controls ||= { velocityPerHour: 10, blockedCountries: [] };
+  return m;
+}
+const merchant = mid => { const m = store.get('merchants', mid); if (!m) throw new HttpError(404, 'not_found', 'Merchant not found'); return normalizeMerchant(m); };
 const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners.length > 0 && m.kyb.owners.every(o => o.idStatus === 'verified') && m.kyb.aml.status === 'clear';
+const cashappReady = (m, mode) => !!(m.cashapp[mode]?.merchant_id && m.cashapp[mode]?.status === 'ACTIVE');
 function liveReady(m) {
   if (!config.livePayments) return 'Live payments are switched off on this platform (LIVE_PAYMENTS=0).';
+  if (!CA.configured('live')) return 'Cash App Pay production credentials are not configured on the server.';
   if (m.status !== 'approved') return 'Business verification is not approved.';
+  if (!cashappReady(m, 'live')) return 'This business is not registered and active with Cash App Pay yet.';
   if (!m.live_enabled) return 'Digital Hub has not activated live mode for this account.';
   return null;
 }
@@ -68,20 +92,53 @@ function assertMode(m, mode) {
   if (m.status === 'suspended' || m.status === 'rejected') throw new HttpError(403, 'account_inactive', `This account is ${m.status}.`);
   if (mode === 'live') { const why = liveReady(m); if (why) throw new HttpError(403, 'live_mode_unavailable', why); }
 }
+function methodAvailable(m, mode) {
+  if (!m.perms.cashapp) return false;
+  if (mode === 'live') return !liveReady(m);
+  return cashappReady(m, 'test') || CA.simulated('test');
+}
 
-/* ---------------- controls & risk ---------------- */
-function methodAvailable(m, mode, method) {
-  if (method === 'card') return m.perms.card && (mode === 'test' ? true : false); // live cards need a connected acquirer adapter
-  if (!m.perms.crypto) return false;
-  if (mode === 'test') return cryptoOptions(m).length > 0;
-  const prov = P.CRYPTO[m.cryptoProvider];
-  return m.providers[m.cryptoProvider] === 'approved' && !!prov?.configured?.() && cryptoOptions(m).length > 0;
+/* ---------------- Cash App merchant registration (Network API brands + merchants) ---------------- */
+function validateDetails(d) {
+  const a = d?.address || {};
+  const clean = {
+    address: { address_line_1: U.str(a.address_line_1, 200), address_line_2: U.str(a.address_line_2, 200) || undefined, locality: U.str(a.locality, 100), administrative_district_level_1: U.str(a.administrative_district_level_1, 2).toUpperCase(), postal_code: U.str(a.postal_code, 10), country: 'US' },
+    category: U.str(d?.category, 4), site_url: U.str(d?.site_url, 500),
+  };
+  if (!clean.address.address_line_1 || !clean.address.locality || !/^[A-Z]{2}$/.test(clean.address.administrative_district_level_1) || !/^\d{5}(-\d{4})?$/.test(clean.address.postal_code)) throw bad('Enter a complete US business address (street, city, 2-letter state, ZIP).');
+  if (!/^\d{4}$/.test(clean.category)) throw bad('Enter the 4-digit merchant category code (MCC).');
+  if (clean.site_url && !U.isUrl(clean.site_url)) throw bad('Website must be a full URL (https://…).');
+  if (!clean.address.address_line_2) delete clean.address.address_line_2;
+  return clean;
 }
-function cryptoOptions(m) {
-  const nets = (P.CRYPTO[m.cryptoProvider] || P.CRYPTO.sandbox).networks, enabled = platform().networksEnabled, out = [];
-  for (const n of nets) if (enabled[n]) for (const a of P.NETWORKS[n].assets) out.push([a, n]);
-  return out;
+async function registerCashApp(m, mode, actor) {
+  if (mode === 'live' && m.status !== 'approved') throw bad('Approve the business (KYB) before registering it with Cash App Pay production.');
+  if (mode === 'live' && !CA.configured('live')) throw bad('Cash App Pay production credentials are not configured on the server.');
+  const details = m.cashapp.details || (CA.simulated(mode) ? { address: { address_line_1: '1 Simulator Way', locality: 'San Francisco', administrative_district_level_1: 'CA', postal_code: '94105', country: 'US' }, category: m.mcc || '5999', site_url: '' } : null);
+  if (!details) throw bad('Submit the business address and MCC under Settings → Cash App Pay first.');
+  const api = CA.client(mode), reg = m.cashapp[mode] || {}, opt = { mid: m.id, op: 'register_merchant' };
+  try {
+    if (!reg.brand_id) {
+      const brand = await api.createBrand({ idempotency_key: `${m.id}:${mode}:brand`, brand: { name: m.name.slice(0, 255), reference_id: m.id } }, opt);
+      reg.brand_id = brand.id;
+    }
+    if (!reg.merchant_id) {
+      const cm = await api.createMerchant({ idempotency_key: `${m.id}:${mode}:merchant`, merchant: { name: m.name, brand_id: reg.brand_id, country: 'US', currency: 'USD', category: details.category, reference_id: m.id, address: details.address, ...(details.site_url ? { site_url: details.site_url } : {}) } }, opt);
+      Object.assign(reg, { merchant_id: cm.id, status: cm.status });
+    } else {
+      reg.status = (await api.retrieveMerchant(reg.merchant_id, opt)).status;
+    }
+    Object.assign(reg, { environment: CA.environmentLabel(mode), registered_at: reg.registered_at || now(), error: null });
+  } catch (e) {
+    reg.error = e.message; m.cashapp[mode] = reg; store.put('merchants', m);
+    throw e instanceof CA.CashAppError ? bad(`Cash App: ${e.message}`, e.code) : e;
+  }
+  m.cashapp[mode] = reg; store.put('merchants', m);
+  audit(actor, 'cashapp.merchant_registered', m.id, `${mode} ${reg.merchant_id} ${reg.status}`, m.id);
+  return reg;
 }
+
+/* ---------------- controls ---------------- */
 function volumeUSD(mid, mode, ms) {
   return store.list('payments', { merchant_id: mid, mode, status: PAID, since: now() - ms }, { limit: 5000 }).reduce((s, p) => s + toUSD(p.amount, p.currency), 0);
 }
@@ -90,390 +147,413 @@ function controlCheck(m, mode, amount, currency, customer) {
   if (usd > Lm.perTxnUSD) return `Amount exceeds this merchant's per-transaction limit of ${fmt(Lm.perTxnUSD, 'USD')}.`;
   if (volumeUSD(m.id, mode, DAY) + usd > Lm.dailyUSD) return `Daily volume limit (${fmt(Lm.dailyUSD, 'USD')}) would be exceeded.`;
   if (volumeUSD(m.id, mode, 30 * DAY) + usd > Lm.monthlyUSD) return `30-day volume limit (${fmt(Lm.monthlyUSD, 'USD')}) would be exceeded.`;
-  if (customer) {
-    if (m.controls.blockedCountries.includes(customer.country)) return 'Payments from this country are not accepted for this merchant.';
+  if (customer?.country && m.controls.blockedCountries.includes(customer.country)) return 'Payments from this country are not accepted for this merchant.';
+  if (customer?.email) {
     const n = store.list('payments', { merchant_id: m.id, mode, since: now() - 3600000 }, { limit: 1000 }).filter(p => p.customer?.email === customer.email).length;
     if (n >= m.controls.velocityPerHour) return 'Too many payment attempts. Try again later.';
   }
   return null;
 }
-function riskScore(m, mode, amount, currency, card, customer) {
-  let s = 8; const why = ['base 8'], usd = toUSD(amount, currency);
-  if (usd > 50000) { s += 40; why.push('amount > $500 (+40)'); } else if (usd > 20000) { s += 18; why.push('amount > $200 (+18)'); }
-  if (card && customer.country && card.country !== customer.country) { s += 22; why.push('card/billing country mismatch (+22)'); }
-  const declines = store.list('payments', { merchant_id: m.id, mode, status: 'declined', since: now() - DAY }, { limit: 500 }).filter(p => p.customer?.email === customer.email).length;
-  if (declines) { s += 15 * declines; why.push(`${declines} recent decline(s)`); }
-  if (m.risk === 'high') { s += 15; why.push('merchant risk tier high (+15)'); }
-  return { score: Math.min(s, 99), why };
-}
-const non3dsAuthorized = m => !!m.non3ds?.ref;
-function decide3DS(m, card, amount, currency, risk) {
-  const tc = P.TEST_CARDS[card.number] || { exemption: true };
-  if (m.threeDS.mode === 'always') return { run: true, reason: 'Merchant policy: authenticate every card payment.' };
-  if (P.SCA.has(card.country)) {
-    if (m.threeDS.lowValueExemption && convert(amount, currency, 'EUR') < 3000 && tc.exemption) return { run: false, exemption: 'low_value', reason: 'Low-value exemption accepted by issuer (SCA region).' };
-    return { run: true, reason: 'Issuer is in an SCA region: 3DS required.' };
-  }
-  if (!non3dsAuthorized(m)) return { run: true, reason: 'No acquirer authorization for non-3DS on file, so 3DS runs.' };
-  if (risk.score >= m.threeDS.riskThreshold) return { run: true, reason: `Risk score ${risk.score} ≥ ${m.threeDS.riskThreshold}: step-up to 3DS.` };
-  return { run: false, exemption: 'non_3ds', reason: `Non-3DS permitted under acquirer approval ${m.non3ds.ref}; fraud liability stays with merchant.` };
-}
-function feeQuote(m, method, amount, currency) {
-  if (method === 'card') { const f = m.fees.card; const provider = pct(amount, f.acqPct) + convert(f.acqFixedUSD, 'USD', currency), platformFee = pct(amount, f.platPct); return { provider, platform: platformFee, net: amount - provider - platformFee }; }
-  const f = m.fees.crypto; const provider = pct(amount, f.provPct), platformFee = pct(amount, f.platPct); return { provider, platform: platformFee, net: amount - provider - platformFee };
-}
+function platformFee(m, amount) { return pct(amount, m.fees.platPct) + convert(m.fees.platFixedUSD, 'USD', 'USD'); }
 
 /* ---------------- public representations ---------------- */
 const ts = t => t ? Math.floor(t / 1000) : null;
 function publicSession(s) {
   return { id: s.id, object: 'checkout.session', livemode: s.mode === 'live', url: `${config.publicUrl}/pay/${s.id}`, status: s.status, amount: s.amount, currency: s.currency, description: s.description,
-    payment_methods: s.methods, payment: s.payment_id || null, payment_status: s.payment_status || 'unpaid', customer_email: s.customer_email || null, metadata: s.metadata || {},
+    payment_methods: ['cashapp'], payment: s.payment_id || null, payment_status: s.payment_status || 'unpaid', customer_email: s.customer_email || null, metadata: s.metadata || {},
     success_url: s.success_url, cancel_url: s.cancel_url, payment_link: s.link_id || null, expires_at: ts(s.expires_at), created: ts(s.created_at) };
 }
 function publicPayment(p) {
+  const c = p.cashapp || {};
   return { id: p.id, object: 'payment', livemode: p.mode === 'live', status: p.status, amount: p.amount, currency: p.currency, method: p.method, description: p.description,
-    amount_refunded: p.refunded, net: p.net, fees: p.fees, customer: { name: p.customer?.name, email: p.customer?.email, country: p.customer?.country }, metadata: p.metadata || {},
+    amount_refunded: p.refunded, net: p.net, fees: p.fees, customer: { name: p.customer?.name || null, email: p.customer?.email || null }, metadata: p.metadata || {},
     checkout_session: p.session_id, payment_link: p.link_id || null, decline_code: p.declineCode || null,
-    card: p.card ? { brand: p.card.brand, last4: p.card.last4, country: p.card.country, three_d_secure: p.card.threeDS?.result || null } : null,
-    crypto: p.crypto ? { provider: p.crypto.provider, asset: p.crypto.asset, network: p.crypto.network, amount_due: p.crypto.quoteAmount, amount_received: p.crypto.received, confirmations: p.crypto.confirmations, confirmations_required: p.crypto.required } : null,
+    cash_app: p.method === 'cashapp' ? { environment: c.env, customer_request_id: c.request_id || null, request_status: c.request_status || null, payment_id: c.payment_id || null, payment_status: c.payment_status || null, capture_before: c.capture_before || null } : null,
     created: ts(p.created_at) };
 }
-const publicRefund = r => ({ id: r.id, object: 'refund', livemode: r.mode === 'live', status: r.status, payment: r.payment_id, amount: r.amount, currency: r.currency, reason: r.reason || null, created: ts(r.created_at) });
-const publicLink = l => ({ id: l.id, object: 'payment_link', livemode: l.mode === 'live', active: l.status === 'active', url: `${config.publicUrl}/l/${l.k}`, amount: l.amount, currency: l.currency, description: l.description, payment_methods: l.methods, reusable: l.reusable, expires_at: ts(l.expires_at), created: ts(l.created_at) });
+const publicRefund = r => ({ id: r.id, object: 'refund', livemode: r.mode === 'live', status: r.status, payment: r.payment_id, amount: r.amount, currency: r.currency, reason: r.reason || null, cash_app_refund_id: r.cashapp_refund_id || null, created: ts(r.created_at) });
+const publicLink = l => ({ id: l.id, object: 'payment_link', livemode: l.mode === 'live', active: l.status === 'active', url: `${config.publicUrl}/l/${l.k}`, amount: l.amount, currency: l.currency, description: l.description, payment_methods: ['cashapp'], reusable: l.reusable, expires_at: ts(l.expires_at), created: ts(l.created_at) });
 const publicPayout = po => ({ id: po.id, object: 'payout', livemode: po.mode === 'live', status: po.status, amount: po.amount, currency: po.currency, destination_currency: po.dest_currency, amount_received: po.receive, fee: po.fee, destination: po.dest_label, reference: po.reference || null, created: ts(po.created_at) });
+const publicDispute = d => ({ id: d.id, object: 'dispute', livemode: d.mode === 'live', status: d.status, state: d.state, payment: d.payment_id, amount: d.amount, currency: d.currency, reason: d.reason, response_due_at: d.response_due_at || null, created: ts(d.created_at) });
 
 /* ---------------- checkout sessions & links ---------------- */
+function checkAmount(amount, currency) {
+  if (!Number.isInteger(amount) || amount < 100) throw bad('amount must be an integer in cents, at least 100 ($1.00).', 'amount_invalid');
+  if (amount > 100000000) throw bad('amount is too large.', 'amount_invalid');
+  if (currency !== CHECKOUT_CURRENCY) throw bad('Cash App Pay accepts USD only. Set currency to USD.', 'currency_invalid');
+}
 function createSession(m, mode, input, actor = 'api') {
   assertMode(m, mode);
-  const amount = Number(input.amount), currency = String(input.currency || '').toUpperCase();
-  if (!Number.isInteger(amount) || amount < 50) throw bad('amount must be an integer in minor units, at least 50 (0.50).', 'amount_invalid');
-  if (amount > 100000000) throw bad('amount is too large.', 'amount_invalid');
-  if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
+  const amount = Number(input.amount), currency = String(input.currency || 'USD').toUpperCase();
+  checkAmount(amount, currency);
   for (const k of ['success_url', 'cancel_url']) if (input[k] && !U.isUrl(input[k])) throw bad(`${k} must be an http(s) URL.`, 'url_invalid');
-  let methods = [].concat(input.payment_methods || input.methods || ['card', 'crypto']).map(String).filter(x => ['card', 'crypto'].includes(x));
-  methods = methods.filter(x => methodAvailable(m, mode, x));
-  if (!methods.length) throw bad('No requested payment method is available for this account in this mode.', 'no_payment_method');
+  if (!methodAvailable(m, mode)) throw bad(mode === 'live' ? (liveReady(m) || 'Cash App Pay is not available for this account.') : 'Register this business with the Cash App Pay sandbox first (Settings → Cash App Pay).', 'no_payment_method');
   const block = controlCheck(m, mode, amount, currency, null); if (block) throw bad(block, 'limit_exceeded');
   const metadata = {}; for (const [k, v] of Object.entries(input.metadata || {}).slice(0, 20)) metadata[U.str(k, 40)] = U.str(v, 500);
-  const s = store.put('checkout_sessions', { id: 'cs_' + rid(28), merchant_id: m.id, mode, status: 'open', amount, currency, description: U.str(input.description || 'Payment', 200), methods,
+  const s = store.put('checkout_sessions', { id: 'cs_' + rid(28), merchant_id: m.id, mode, status: 'open', amount, currency, description: U.str(input.description || 'Payment', 200), methods: ['cashapp'],
     success_url: input.success_url || null, cancel_url: input.cancel_url || null, metadata, customer_email: U.isEmail(input.customer_email) ? input.customer_email : null,
-    link_id: input.link_id || null, payment_id: null, card_attempts: 0, expires_at: now() + 24 * 3600000 });
+    link_id: input.link_id || null, payment_id: null, attempts: 0, expires_at: now() + 24 * 3600000 });
   audit(actor, 'checkout_session.create', s.id, fmt(amount, currency), m.id);
   return s;
 }
 function createLink(m, mode, input, actor) {
   assertMode(m, mode);
   if (!m.perms.links) throw new HttpError(403, 'links_disabled', 'Payment links are disabled for this account.');
-  const amount = Number(input.amount), currency = String(input.currency || '').toUpperCase();
-  if (!Number.isInteger(amount) || amount < 50) throw bad('amount must be an integer in minor units, at least 50.', 'amount_invalid');
-  if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
+  const amount = Number(input.amount), currency = String(input.currency || 'USD').toUpperCase();
+  checkAmount(amount, currency);
   const description = U.str(input.description, 200); if (!description) throw bad('description is required.');
-  const methods = [].concat(input.payment_methods || ['card', 'crypto']).filter(x => ['card', 'crypto'].includes(x));
-  if (!methods.length) throw bad('Choose at least one payment method.');
   const days = Number(input.expires_in_days || 0);
-  const l = store.put('links', { id: id('plink'), merchant_id: m.id, mode, status: 'active', k: rid(24, 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'), amount, currency, description, methods,
+  const l = store.put('links', { id: id('plink'), merchant_id: m.id, mode, status: 'active', k: rid(24, 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'), amount, currency, description, methods: ['cashapp'],
     reusable: !!input.reusable, expires_at: days > 0 ? now() + days * DAY : null, payments: [] });
   audit(actor, 'payment_link.create', l.id, fmt(amount, currency), m.id);
   return l;
 }
 const linkActive = l => l.status === 'active' && (!l.expires_at || now() < l.expires_at);
-
-/* ---------------- card payments (sandbox acquirer) ---------------- */
-function newPayment(s, method, customer) {
-  const p = { id: id('pay'), merchant_id: s.merchant_id, mode: s.mode, status: 'created', session_id: s.id, link_id: s.link_id, method, amount: s.amount, currency: s.currency, description: s.description,
-    customer, metadata: s.metadata, fees: null, net: null, refunded: 0, settled: false, events: [] };
-  addEvent(p, 'created', `Checkout session ${s.id}`);
-  return p;
-}
 const addEvent = (p, status, note = '') => p.events.push({ at: now(), status, note });
-function sessionPayable(s) {
-  if (s.status !== 'open') throw new HttpError(409, 'session_closed', s.status === 'complete' ? 'This checkout is already paid.' : 'This checkout has expired.');
-  if (now() > s.expires_at) throw new HttpError(409, 'session_expired', 'This checkout has expired.');
-  if (s.payment_id) { const p = store.get('payments', s.payment_id); if (p && ['authorized', 'captured', 'confirming', 'awaiting_payment', 'requires_action'].includes(p.status)) throw new HttpError(409, 'payment_in_progress', 'A payment for this checkout is already in progress.'); }
-}
-function cardPay(s, input) {
-  return store.tx(() => {
-    const m = merchant(s.merchant_id); assertMode(m, s.mode); sessionPayable(s);
-    if (!s.methods.includes('card') || !methodAvailable(m, s.mode, 'card')) throw bad('Card payments are not available for this checkout.');
-    if (s.mode !== 'test') throw bad('Live card processing is pending acquirer integration.', 'card_unavailable');
-    if (++s.card_attempts > 8) { store.put('checkout_sessions', s); throw new HttpError(429, 'too_many_attempts', 'Too many card attempts for this checkout.'); }
-    store.put('checkout_sessions', s);
-    const number = String(input.number || '').replace(/\D/g, '');
-    if (!/^\d{13,19}$/.test(number) || !U.luhn(number)) throw bad('Card number is invalid.', 'card_number_invalid');
-    const tc = P.TEST_CARDS[number];
-    if (!tc) throw bad('Sandbox accepts test cards only. Real card numbers are never processed here.', 'test_card_required');
-    const exp = String(input.exp || ''), mm = +exp.slice(0, 2), yy = +exp.slice(-2);
-    if (!/^\d{2}\s?\/\s?\d{2}$/.test(exp) || mm < 1 || mm > 12 || new Date(2000 + yy, mm, 1).getTime() <= now()) throw bad('Expiry is invalid or in the past.', 'expiry_invalid');
-    if (!/^\d{3,4}$/.test(String(input.cvc || ''))) throw bad('Security code is invalid.', 'cvc_invalid');
-    const customer = customerFrom(input);
-    const block = controlCheck(m, s.mode, s.amount, s.currency, customer);
-    if (block) { alert('low', 'control_block', m.id, s.id, block, s.mode); throw bad(block, 'blocked_by_controls'); }
-    const card = { number, brand: tc.brand, country: tc.country };
-    const p = newPayment(s, 'card', customer);
-    p.card = { brand: tc.brand, last4: number.slice(-4), bin: number.slice(0, 6), country: tc.country };
-    p.risk = riskScore(m, s.mode, s.amount, s.currency, card, customer);
-    const d = decide3DS(m, card, s.amount, s.currency, p.risk);
-    p.card.threeDS = { required: d.run, reason: d.reason, exemption: d.exemption || null };
-    s.payment_id = p.id; store.put('checkout_sessions', s);
-    if (d.run && tc.threeDS === 'challenge') {
-      p.status = 'requires_action'; p.card.pendingNumber = U.seal(number); addEvent(p, 'requires_action', '3DS challenge issued by issuer ACS');
-      store.put('payments', p); return p;
-    }
-    if (d.run) Object.assign(p.card.threeDS, { result: 'authenticated', flow: 'frictionless', liability: 'issuer' });
-    else Object.assign(p.card.threeDS, { result: 'not_performed', liability: 'merchant' });
-    addEvent(p, d.run ? 'authenticated' : '3ds_skipped', d.reason);
-    return authorize(p, m, s, number, 'ok');
-  });
-}
-function customerFrom(input) {
-  const c = { name: U.str(input.name, 120), email: U.str(input.email, 200).toLowerCase(), country: U.str(input.country, 2).toUpperCase() };
-  if (c.name.length < 2) throw bad('Enter your name.', 'name_required');
-  if (!U.isEmail(c.email)) throw bad('Enter a valid email address.', 'email_invalid');
-  return c;
-}
-function complete3DS(p, code) {
-  return store.tx(() => {
-    if (p.status !== 'requires_action') throw bad('No authentication pending.');
-    const m = merchant(p.merchant_id), s = store.get('checkout_sessions', p.session_id), number = U.unseal(p.card.pendingNumber);
-    delete p.card.pendingNumber; p.card.threeDS.flow = 'challenge';
-    if (String(code) !== '123456') { p.card.threeDS.result = 'failed'; return authorize(p, m, s, number, 'failed'); }
-    Object.assign(p.card.threeDS, { result: 'authenticated', liability: 'issuer' }); addEvent(p, 'authenticated', '3DS challenge completed');
-    return authorize(p, m, s, number, 'ok');
-  });
-}
-function authorize(p, m, s, number, threeDSResult) {
-  const r = P.CardSandbox.authorize({ number, threeDSResult });
-  if (!r.ok) {
-    p.status = 'declined'; p.declineCode = r.code; addEvent(p, 'declined', r.message); store.put('payments', p);
-    emit(m.id, p.mode, 'payment.failed', publicPayment(p));
-    const rules = platform().risk;
-    if (store.list('payments', { merchant_id: m.id, mode: p.mode, status: 'declined', since: now() - DAY }, { limit: 500 }).filter(x => x.customer.email === p.customer.email).length >= rules.declineCount)
-      alert('medium', 'card_testing', m.id, p.id, `${rules.declineCount}+ declines in 24h for ${p.customer.email}`, p.mode);
-    return p;
-  }
-  p.card.authCode = r.authCode; p.status = 'authorized'; p.authorized_at = now(); p.auth_expires_at = now() + 7 * dayMs(p.mode);
-  addEvent(p, 'authorized', `Auth code ${r.authCode}`); store.put('payments', p);
-  emit(m.id, p.mode, 'payment.authorized', publicPayment(p));
-  if (toUSD(p.amount, p.currency) > platform().risk.highValueUSD) alert('medium', 'high_value', m.id, p.id, `High-value card payment ${fmt(p.amount, p.currency)}`, p.mode);
-  if (m.captureMode === 'auto') capture(p, 'system');
-  completeSession(s, p);
-  return p;
-}
-function capture(p, actor) {
-  return store.tx(() => {
-    if (p.status !== 'authorized') throw bad('Only authorized payments can be captured.', 'payment_not_capturable');
-    const m = merchant(p.merchant_id), f = feeQuote(m, 'card', p.amount, p.currency);
-    L.post(p.mode, `${p.id}:capture`, [
-      { acct: ACCT.ACQ_RCV, cur: p.currency, amt: p.amount - f.provider },
-      { acct: ACCT.M_PENDING, mid: m.id, cur: p.currency, amt: -f.net },
-      { acct: ACCT.P_REV, cur: p.currency, amt: -f.platform },
-    ], { ref: p.id, memo: 'Card capture (acquirer fee netted)' });
-    Object.assign(p, { fees: { provider: f.provider, platform: f.platform }, net: f.net, status: 'captured', captured_at: now(), pendingRemaining: f.net, rcvRemaining: p.amount - f.provider });
-    addEvent(p, 'captured', `Net ${fmt(f.net, p.currency)} pending T+2`); store.put('payments', p);
-    emit(m.id, p.mode, 'payment.succeeded', publicPayment(p));
-    if (actor !== 'system') audit(actor, 'payment.capture', p.id, '', m.id);
-    return p;
-  });
-}
-function cancel(p, actor) {
-  if (p.status !== 'authorized') throw bad('Only uncaptured authorizations can be canceled.');
-  p.status = 'canceled'; addEvent(p, 'canceled', 'Authorization released'); store.put('payments', p);
-  audit(actor, 'payment.cancel', p.id, '', p.merchant_id); emit(p.merchant_id, p.mode, 'payment.canceled', publicPayment(p));
-  return p;
-}
 function completeSession(s, p) {
-  if (!s || s.status !== 'open') return;
-  s.status = 'complete'; s.payment_status = 'paid'; s.payment_id = p.id; store.put('checkout_sessions', s);
+  if (!s) return;
+  if (s.status === 'complete' && s.payment_id === p.id && s.payment_status === 'authorized' && p.status === 'captured') {
+    s.payment_status = 'paid'; store.put('checkout_sessions', s); emit(s.merchant_id, s.mode, 'checkout.session.completed', publicSession(s)); return;
+  }
+  if (s.status !== 'open') return;
+  s.status = 'complete'; s.payment_status = p.status === 'authorized' ? 'authorized' : 'paid'; s.payment_id = p.id; store.put('checkout_sessions', s);
   if (s.link_id) { const l = store.get('links', s.link_id); if (l) { l.payments.push(p.id); if (!l.reusable) l.status = 'completed'; store.put('links', l); } }
   emit(s.merchant_id, s.mode, 'checkout.session.completed', publicSession(s));
 }
+function sessionPayable(s) {
+  if (s.status !== 'open') throw new HttpError(409, 'session_closed', s.status === 'complete' ? 'This checkout is already paid.' : 'This checkout has expired.');
+  if (now() > s.expires_at) throw new HttpError(409, 'session_expired', 'This checkout has expired.');
+  if (s.payment_id) { const p = store.get('payments', s.payment_id); if (p && [...IN_FLIGHT, 'authorized', 'captured'].includes(p.status)) throw new HttpError(409, 'payment_in_progress', 'A payment for this checkout is already in progress.'); }
+}
 
-/* ---------------- crypto payments ---------------- */
-async function cryptoStart(s, input) {
+/* ---------------- Cash App Pay payments ----------------
+   1. Customer Request API: ONE_TIME_PAYMENT request (QR / mobile_url) — status PENDING → APPROVED | DECLINED
+   2. On APPROVED, the request carries a grant; Network API create payment with that grant
+   3. Payment status AUTHORIZED | CAPTURED | VOIDED | DECLINED; the wallet credits only CAPTURED */
+async function startCashApp(s, input) {
   const m = merchant(s.merchant_id); assertMode(m, s.mode); sessionPayable(s);
-  if (!s.methods.includes('crypto') || !methodAvailable(m, s.mode, 'crypto')) throw bad('Stablecoin payments are not available for this checkout.');
-  const customer = customerFrom(input);
-  const asset = String(input.asset || '').toUpperCase(), network = String(input.network || '').toUpperCase();
-  if (!cryptoOptions(m).some(([a, n]) => a === asset && n === network)) throw bad('That asset / network pair is not offered.', 'pair_unavailable');
+  if (!methodAvailable(m, s.mode)) throw bad('Cash App Pay is not available for this checkout.');
+  if (s.mode === 'test' && !cashappReady(m, 'test')) await registerCashApp(m, 'test', 'system');
+  const customer = { name: U.str(input.name, 120), email: U.isEmail(String(input.email || '').toLowerCase()) ? String(input.email).toLowerCase() : null, country: U.str(input.country, 2).toUpperCase() || null };
   const block = controlCheck(m, s.mode, s.amount, s.currency, customer);
   if (block) { alert('low', 'control_block', m.id, s.id, block, s.mode); throw bad(block, 'blocked_by_controls'); }
-  if (s.mode === 'live' && s.currency !== 'USD') throw bad('Live stablecoin checkout supports USD-priced sessions only.', 'currency_unsupported');
-  const quoteAmount = s.mode === 'live' ? s.amount : Math.ceil(s.amount / CURRENCIES[s.currency].fx * CURRENCIES[asset].fx);
-  const p = newPayment(s, 'crypto', customer);
-  const provider = s.mode === 'test' ? 'sandbox' : m.cryptoProvider;
-  p.crypto = { provider, route: m.cryptoProvider, asset, network, quoteAmount, received: 0, confirmations: 0, required: P.NETWORKS[network].confirmations,
-    expiresAt: now() + 15 * 60000 * (s.mode === 'test' ? 1 : 1), txHashes: [], excess: 0, tradeNo: 'DH' + rid(24, '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') };
-  const returnUrl = `${config.publicUrl}/pay/${s.id}`;
-  if (provider === 'sandbox') p.crypto.address = P.genAddress(network);
-  else if (provider === 'binance') Object.assign(p.crypto, await P.BinancePay.createOrder({ tradeNo: p.crypto.tradeNo, amount: quoteAmount, asset, description: s.description, returnUrl, cancelUrl: s.cancel_url || returnUrl }));
-  else if (provider === 'coinbase') Object.assign(p.crypto, await P.Coinbase.createCharge({ paymentId: p.id, amount: s.amount, currency: s.currency, description: s.description, returnUrl, cancelUrl: s.cancel_url || returnUrl }));
-  p.status = 'awaiting_payment'; addEvent(p, 'awaiting_payment', `Quote ${fmt(quoteAmount, asset)} on ${P.NETWORKS[network].label} via ${P.CRYPTO[provider].name}`);
-  store.tx(() => { store.put('payments', p); s.payment_id = p.id; store.put('checkout_sessions', s); });
-  emit(m.id, s.mode, 'crypto.payment.created', publicPayment(p));
+  const p = { id: id('pay'), merchant_id: m.id, mode: s.mode, status: 'awaiting_customer', session_id: s.id, link_id: s.link_id, method: 'cashapp', amount: s.amount, currency: s.currency, description: s.description,
+    customer, metadata: s.metadata, fees: null, net: null, refunded: 0, settled: false, events: [], cashapp: { env: CA.environmentLabel(s.mode) } };
+  const req = await CA.client(s.mode).createCustomerRequest({ idempotency_key: p.id, request: {
+    channel: 'ONLINE', redirect_url: `${config.publicUrl}/pay/${s.id}`, reference_id: p.id,
+    actions: [{ type: 'ONE_TIME_PAYMENT', amount: s.amount, currency: 'USD', scope_id: m.cashapp[s.mode].merchant_id }] } }, { mid: m.id, op: 'create_customer_request' });
+  Object.assign(p.cashapp, { request_id: req.id, request_status: req.status, triggers: req.auth_flow_triggers || null, request_expires_at: req.expires_at ? Date.parse(req.expires_at) : null });
+  p.k = req.id;
+  addEvent(p, 'awaiting_customer', `Cash App customer request ${req.id} created (${p.cashapp.env})`);
+  store.tx(() => { store.put('payments', p); s.payment_id = p.id; s.attempts = (s.attempts || 0) + 1; store.put('checkout_sessions', s); });
+  emit(m.id, s.mode, 'payment.created', publicPayment(p));
   return p;
 }
-/** Funds seen on chain / by provider. Only called from a verified provider event or the sandbox simulator. */
-function cryptoDetected(p, amount, viaNetwork) {
-  return store.tx(() => {
-    if (!['awaiting_payment', 'underpaid'].includes(p.status)) return p;
-    if (viaNetwork && viaNetwork !== p.crypto.network) {
-      p.status = 'wrong_network'; addEvent(p, 'wrong_network', `Transfer on ${viaNetwork}; invoice expects ${p.crypto.network}. Not credited.`); store.put('payments', p);
-      alert('high', 'wrong_network', p.merchant_id, p.id, `Customer sent ${fmt(amount, p.crypto.asset)} on the wrong network`, p.mode);
-      return p;
+
+/** Brings a payment up to date with Cash App. Safe to call repeatedly (idempotent create calls). */
+async function syncPayment(p, { force } = {}) {
+  if (p.method !== 'cashapp') return p;
+  if (!force && p.cashapp.last_sync && now() - p.cashapp.last_sync < 1500) return p;
+  p.cashapp.last_sync = now();
+  const api = CA.client(p.mode), opt = { mid: p.merchant_id, op: 'sync_payment' };
+  try {
+    if (p.status === 'awaiting_customer') {
+      const r = await api.retrieveCustomerRequest(p.cashapp.request_id, opt);
+      await applyCustomerRequest(p, r);
+      p = store.get('payments', p.id);
     }
-    const n = p.crypto.txHashes.length + 1, tx = (P.NETWORKS[p.crypto.network].addr === 'evm' ? '0x' : '') + rid(64, '0123456789abcdef');
-    p.crypto.txHashes.push(tx); p.crypto.received += amount; p.crypto.confirmations = 0;
-    L.post(p.mode, `${p.id}:detect:${n}`, [{ acct: ACCT.P_CUSTODY, cur: p.crypto.asset, amt: amount }, { acct: ACCT.C_SUSPENSE, mid: p.merchant_id, cur: p.crypto.asset, amt: -amount }], { ref: p.id, memo: 'Funds detected, held in suspense until confirmed' });
-    p.status = 'confirming'; addEvent(p, 'detected', `${fmt(amount, p.crypto.asset)} detected`); store.put('payments', p);
-    emit(p.merchant_id, p.mode, 'crypto.payment.detected', publicPayment(p));
+    if (p.status === 'processing') await createCashAppPayment(p);
+    else if (p.status === 'authorized' && p.cashapp.payment_id) applyCashAppPayment(store.get('payments', p.id), await api.retrievePayment(p.cashapp.payment_id, opt));
+    else store.put('payments', p);
+  } catch (e) {
+    if (!(e instanceof CA.CashAppError)) throw e;
+    p.cashapp.last_error = e.message; store.put('payments', p);
+  }
+  return store.get('payments', p.id);
+}
+async function applyCustomerRequest(p, r) {
+  if (p.status !== 'awaiting_customer') return;
+  Object.assign(p.cashapp, { request_status: r.status, triggers: r.auth_flow_triggers || p.cashapp.triggers, request_expires_at: r.expires_at ? Date.parse(r.expires_at) : p.cashapp.request_expires_at });
+  if (r.status === 'APPROVED') {
+    const grant = (r.grants || []).find(g => g.action?.type === 'ONE_TIME_PAYMENT');
+    if (!grant) { store.put('payments', p); return; }
+    Object.assign(p.cashapp, { grant_id: grant.id, customer_id: grant.customer_id });
+    p.status = 'processing'; addEvent(p, 'approved', 'Customer approved in Cash App'); store.put('payments', p);
+    await createCashAppPayment(p);
+  } else if (r.status === 'DECLINED') {
+    const expired = p.cashapp.request_expires_at && now() >= p.cashapp.request_expires_at - 5000;
+    p.status = expired ? 'expired' : 'declined'; p.declineCode = expired ? 'request_expired' : 'customer_declined';
+    addEvent(p, p.status, expired ? 'Customer request expired before approval' : 'Customer declined in Cash App'); store.put('payments', p);
+    emit(p.merchant_id, p.mode, 'payment.failed', publicPayment(p));
+  } else store.put('payments', p);
+}
+async function createCashAppPayment(p) {
+  const m = merchant(p.merchant_id);
+  try {
+    const cp = await CA.client(p.mode).createPayment({ idempotency_key: `${p.id}:payment`, payment: { amount: p.amount, currency: 'USD', merchant_id: m.cashapp[p.mode].merchant_id, grant_id: p.cashapp.grant_id, reference_id: p.id, capture: m.captureMode !== 'manual' } }, { mid: m.id, op: 'create_payment' });
+    applyCashAppPayment(store.get('payments', p.id), cp);
+  } catch (e) {
+    if (!(e instanceof CA.CashAppError)) throw e;
+    const cur = store.get('payments', p.id); cur.cashapp.last_error = e.message;
+    if (e.retryable) { addEvent(cur, 'processing', `Cash App did not answer; retrying with the same idempotency key (${e.message})`); store.put('payments', cur); return; }
+    cur.status = 'declined'; cur.declineCode = e.code; addEvent(cur, 'declined', `Cash App rejected the payment: ${e.message}`); store.put('payments', cur);
+    emit(cur.merchant_id, cur.mode, 'payment.failed', publicPayment(cur));
+  }
+}
+/** Applies a Cash App payment object (from an API response or a verified payment.status.updated webhook). */
+function applyCashAppPayment(p, cp) {
+  return store.tx(() => {
+    if (cp.reference_id && cp.reference_id !== p.id) throw bad('Cash App payment does not belong to this Digital Hub payment.');
+    const m = merchant(p.merchant_id);
+    Object.assign(p.cashapp, { payment_id: cp.id, payment_status: cp.status, capture_before: cp.capture_before || null, fee_amount: cp.fee_amount ?? null, customer_id: cp.customer_id || p.cashapp.customer_id, decline_errors: cp.decline_errors || [] });
+    const s = store.get('checkout_sessions', p.session_id);
+    if (cp.status === 'CAPTURED' && !p.captured_at) {
+      const captured = cp.captured_amount || cp.amount, provider = Math.round(Number(cp.fee_amount) || 0), plat = platformFee(m, captured), net = captured - provider - plat;
+      L.post(p.mode, `${p.id}:capture`, [
+        { acct: ACCT.ACQ_RCV, cur: p.currency, amt: captured - provider },
+        { acct: ACCT.M_PENDING, mid: m.id, cur: p.currency, amt: -net },
+        { acct: ACCT.P_REV, cur: p.currency, amt: -plat },
+      ], { ref: p.id, memo: 'Cash App Pay capture (Cash App fee netted)' });
+      Object.assign(p, { status: 'captured', captured_at: now(), fees: { provider, platform: plat }, net, pendingRemaining: net, rcvRemaining: captured - provider });
+      addEvent(p, 'captured', `Cash App payment ${cp.id} captured. Fees ${fmt(provider + plat, p.currency)}${cp.fee_amount == null ? ' (Cash App fee not reported yet)' : ''}.`);
+      store.put('payments', p); completeSession(s, p);
+      emit(m.id, p.mode, 'payment.succeeded', publicPayment(p));
+      if (toUSD(captured, p.currency) > platform().risk.highValueUSD) alert('medium', 'high_value', m.id, p.id, `High-value payment ${fmt(captured, p.currency)}`, p.mode);
+    } else if (cp.status === 'AUTHORIZED' && IN_FLIGHT.includes(p.status)) {
+      p.status = 'authorized'; addEvent(p, 'authorized', `Authorized by Cash App; capture before ${cp.capture_before || 'the deadline'}`);
+      store.put('payments', p); completeSession(s, p); emit(m.id, p.mode, 'payment.authorized', publicPayment(p));
+    } else if (cp.status === 'DECLINED' && p.status !== 'declined') {
+      p.status = 'declined'; p.declineCode = cp.decline_errors?.[0]?.code || 'declined';
+      addEvent(p, 'declined', cp.decline_errors?.[0]?.detail || 'Cash App declined the payment'); store.put('payments', p);
+      emit(m.id, p.mode, 'payment.failed', publicPayment(p));
+      const rules = platform().risk;
+      if (p.customer?.email && store.list('payments', { merchant_id: m.id, mode: p.mode, status: 'declined', since: now() - DAY }, { limit: 500 }).filter(x => x.customer?.email === p.customer.email).length >= rules.declineCount)
+        alert('medium', 'repeated_declines', m.id, p.id, `${rules.declineCount}+ declines in 24h for ${p.customer.email}`, p.mode);
+    } else if (cp.status === 'VOIDED' && p.status !== 'canceled') {
+      p.status = 'canceled'; addEvent(p, 'canceled', 'Authorization voided'); store.put('payments', p);
+      emit(m.id, p.mode, 'payment.canceled', publicPayment(p));
+    } else store.put('payments', p);
     return p;
   });
 }
-function cryptoTick(p, jump) {
-  return store.tx(() => {
-    if (p.status !== 'confirming') return p;
-    p.crypto.confirmations = Math.min(p.crypto.required, p.crypto.confirmations + (jump || Math.max(1, Math.ceil(p.crypto.required / 5))));
-    if (p.crypto.confirmations < p.crypto.required) { store.put('payments', p); return p; }
-    const c = p.crypto;
-    if (c.received < c.quoteAmount) {
-      p.status = 'underpaid'; addEvent(p, 'underpaid', `Received ${fmt(c.received, c.asset)} of ${fmt(c.quoteAmount, c.asset)}`); store.put('payments', p);
-      alert('low', 'underpaid', p.merchant_id, p.id, `Underpaid by ${fmt(c.quoteAmount - c.received, c.asset)}`, p.mode);
-      emit(p.merchant_id, p.mode, 'crypto.payment.underpaid', publicPayment(p)); return p;
-    }
-    return cryptoCredit(p, c.quoteAmount, c.received - c.quoteAmount, 'Confirmed at required depth');
-  });
+async function capture(p, actor) {
+  if (p.status !== 'authorized' || !p.cashapp?.payment_id) throw bad('Only authorized Cash App payments can be captured.', 'payment_not_capturable');
+  const cp = await CA.client(p.mode).capturePayment(p.cashapp.payment_id, { idempotency_key: `${p.id}:capture`, amount: p.amount }, { mid: p.merchant_id, op: 'capture_payment' }).catch(caError);
+  const out = applyCashAppPayment(store.get('payments', p.id), cp); audit(actor, 'payment.capture', p.id, '', p.merchant_id); return out;
 }
-function cryptoCredit(p, creditAmount, excess, note) {
-  const m = merchant(p.merchant_id), c = p.crypto, f = feeQuote(m, 'crypto', creditAmount, c.asset);
-  L.post(p.mode, `${p.id}:confirm`, [
-    { acct: ACCT.C_SUSPENSE, mid: m.id, cur: c.asset, amt: creditAmount + excess },
-    { acct: ACCT.M_AVAIL, mid: m.id, cur: c.asset, amt: -f.net },
-    { acct: ACCT.P_REV, cur: c.asset, amt: -f.platform },
-    { acct: ACCT.P_CUSTODY, cur: c.asset, amt: -f.provider },
-    { acct: ACCT.C_OVERPAY, mid: m.id, cur: c.asset, amt: -excess },
-  ], { ref: p.id, memo: excess ? 'Confirmed; excess held for customer refund' : 'Confirmed' });
-  Object.assign(p, { fees: { provider: f.provider, platform: f.platform }, net: f.net, settled: true, creditedAmount: creditAmount, status: excess > 0 ? 'overpaid' : 'confirmed', confirmed_at: now() });
-  c.excess = excess; addEvent(p, p.status, `${note}. Net ${fmt(f.net, c.asset)} available.`); store.put('payments', p);
-  if (excess) alert('low', 'overpaid', m.id, p.id, `Overpaid by ${fmt(excess, c.asset)}`, p.mode);
-  emit(m.id, p.mode, 'payment.succeeded', publicPayment(p));
-  completeSession(store.get('checkout_sessions', p.session_id), p);
-  return p;
+async function cancel(p, actor) {
+  if (p.status === 'awaiting_customer') { p.status = 'canceled'; addEvent(p, 'canceled', 'Canceled before the customer approved'); store.put('payments', p); audit(actor, 'payment.cancel', p.id, '', p.merchant_id); return p; }
+  if (p.status !== 'authorized' || !p.cashapp?.payment_id) throw bad('Only uncaptured authorizations can be voided.');
+  const cp = await CA.client(p.mode).voidPayment(p.cashapp.payment_id, { mid: p.merchant_id, op: 'void_payment' }).catch(caError);
+  const out = applyCashAppPayment(store.get('payments', p.id), cp); audit(actor, 'payment.cancel', p.id, '', p.merchant_id); return out;
 }
-function cryptoExpire(p) {
-  if (p.status !== 'awaiting_payment') return p;
-  p.status = 'expired'; addEvent(p, 'expired', 'Quote window closed with no funds received'); store.put('payments', p);
-  emit(p.merchant_id, p.mode, 'crypto.payment.expired', publicPayment(p)); return p;
-}
-function acceptPartial(p, actor) {
-  return store.tx(() => { if (p.status !== 'underpaid') throw bad('Payment is not underpaid.'); cryptoCredit(p, p.crypto.received, 0, 'Merchant accepted partial payment'); audit(actor, 'payment.accept_partial', p.id, '', p.merchant_id); return p; });
-}
-/** Live provider confirmed payment (verified webhook). Credits instantly at provider-confirmed amount. */
-function providerPaid(p, amount) {
-  return store.tx(() => {
-    if (!['awaiting_payment', 'confirming', 'underpaid'].includes(p.status)) return p;
-    const amt = amount ?? p.crypto.quoteAmount;
-    if (p.status === 'awaiting_payment') { cryptoDetected(p, amt); p = store.get('payments', p.id); }
-    return cryptoTick(p, p.crypto.required);
-  });
-}
+function caError(e) { if (e instanceof CA.CashAppError) throw new HttpError(e.retryable ? 502 : 400, e.code, `Cash App: ${e.message}`); throw e; }
 
-/* ---------------- refunds & disputes ---------------- */
+/* ---------------- refunds ---------------- */
+function refundsFor(p) { return store.list('refunds', { merchant_id: p.merchant_id }, { limit: 1000 }).filter(r => r.payment_id === p.id); }
 function maxRefundable(p) {
-  if (p.method === 'card') return ['captured', 'settled', 'partially_refunded'].includes(p.status) ? p.amount - p.refunded : 0;
-  return ['confirmed', 'overpaid', 'partially_refunded'].includes(p.status) ? (p.creditedAmount ?? 0) - p.refunded : 0;
+  if (p.method !== 'cashapp' || !['captured', 'settled', 'partially_refunded'].includes(p.status)) return 0;
+  const pending = refundsFor(p).filter(r => r.status === 'pending').reduce((s, r) => s + r.amount, 0);
+  return Math.max(0, p.amount - p.refunded - pending);
 }
-function refund(p, amount, { actor, reason, address, network }) {
+async function refund(p, amount, { actor, reason }) {
+  const m = merchant(p.merchant_id), cur = p.currency;
+  if (!m.perms.refunds) throw new HttpError(403, 'refunds_disabled', 'Refunds are disabled for this account.');
+  if (p.method !== 'cashapp') throw bad('Only Cash App Pay payments can be refunded here.');
+  amount = amount == null ? maxRefundable(p) : Number(amount);
+  if (!Number.isInteger(amount) || amount <= 0) throw bad('Refund amount must be a positive integer (cents).');
+  if (amount > maxRefundable(p)) throw bad(`The most you can refund is ${fmt(maxRefundable(p), cur)}.`, 'amount_too_large');
+  const today = store.list('refunds', { merchant_id: m.id, mode: p.mode, since: now() - DAY }).filter(r => r.status !== 'declined').reduce((s, r) => s + toUSD(r.amount, r.currency), 0);
+  if (today + toUSD(amount, cur) > m.limits.refundDailyUSD) throw bad('Daily refund limit reached. Contact Digital Hub.', 'refund_limit');
+  const fromAcct = p.settled ? ACCT.M_AVAIL : ACCT.M_PENDING;
+  if (L.balance(m.id, p.mode, fromAcct, cur) < amount) throw bad(`${p.settled ? 'Available' : 'Pending'} balance is too low for this refund.`, 'insufficient_balance');
+  const r = { id: id('re'), merchant_id: m.id, mode: p.mode, status: 'pending', payment_id: p.id, amount, currency: cur, reason: U.str(reason, 100), actor };
+  store.put('refunds', r);
+  try {
+    const cr = await CA.client(p.mode).createRefund({ idempotency_key: r.id, refund: { amount, currency: 'USD', merchant_id: m.cashapp[p.mode].merchant_id, payment_id: p.cashapp.payment_id, capture: true, reference_id: r.id } }, { mid: m.id, op: 'create_refund' });
+    return applyCashAppRefund(r.id, cr);
+  } catch (e) {
+    if (!(e instanceof CA.CashAppError)) throw e;
+    if (e.retryable) { r.error = e.message; store.put('refunds', r); audit(actor, 'refund.pending', p.id, e.message, m.id); return r; }
+    r.status = 'failed'; r.error = e.message; store.put('refunds', r);
+    throw bad(`Cash App refused the refund: ${e.message}`, e.code);
+  } finally { audit(actor, 'refund.create', p.id, fmt(amount, cur), m.id); }
+}
+/** Applies a Cash App refund (API response or verified refund.status.updated webhook). Ledger moves only on CAPTURED. */
+function applyCashAppRefund(refundId, cr) {
   return store.tx(() => {
-    const m = merchant(p.merchant_id), cur = p.method === 'card' ? p.currency : p.crypto.asset;
-    if (!m.perms.refunds) throw new HttpError(403, 'refunds_disabled', 'Refunds are disabled for this account.');
-    amount = amount == null ? maxRefundable(p) : Number(amount);
-    if (!Number.isInteger(amount) || amount <= 0) throw bad('Refund amount must be a positive integer (minor units).');
-    if (amount > maxRefundable(p)) throw bad(`The most you can refund is ${fmt(maxRefundable(p), cur)}.`, 'amount_too_large');
-    const today = store.list('refunds', { merchant_id: m.id, mode: p.mode, since: now() - DAY }).reduce((s, r) => s + toUSD(r.amount, r.currency), 0);
-    if (today + toUSD(amount, cur) > m.limits.refundDailyUSD) throw bad('Daily refund limit reached. Contact Digital Hub.', 'refund_limit');
-    const n = store.count('refunds', { merchant_id: m.id }) + 1;
-    const r = { id: id('re'), merchant_id: m.id, mode: p.mode, status: 'succeeded', payment_id: p.id, amount, currency: cur, reason: U.str(reason, 100), actor, kind: 'refund' };
-    if (p.method === 'card') {
-      if (!p.settled && p.refunded === 0 && amount === p.amount) {
-        const lines = L.entriesFor(p.id).filter(e => e.journal_key === `${p.id}:capture`).map(e => ({ acct: e.account, mid: e.merchant_id, cur: e.currency, amt: -e.amount }));
-        L.post(p.mode, `${p.id}:reversal`, lines, { ref: p.id, memo: 'Reversal before settlement; fees returned' });
-        Object.assign(p, { refunded: amount, status: 'reversed', pendingRemaining: 0, rcvRemaining: 0 }); r.kind = 'reversal'; addEvent(p, 'reversed', 'Full reversal before settlement');
-      } else if (!p.settled) {
-        if (L.balance(m.id, p.mode, ACCT.M_PENDING, cur) < amount) throw bad('Pending balance is too low for this refund.');
-        L.post(p.mode, `${p.id}:refund:${n}`, [{ acct: ACCT.M_PENDING, mid: m.id, cur, amt: amount }, { acct: ACCT.ACQ_RCV, cur, amt: -amount }], { ref: p.id, memo: 'Refund before settlement' });
-        p.pendingRemaining -= amount; p.rcvRemaining -= amount; p.refunded += amount;
-      } else {
-        if (L.balance(m.id, p.mode, ACCT.M_AVAIL, cur) < amount) throw bad(`Available ${cur} balance is too low for this refund.`, 'insufficient_balance');
-        L.post(p.mode, `${p.id}:refund:${n}`, [{ acct: ACCT.M_AVAIL, mid: m.id, cur, amt: amount }, { acct: ACCT.P_CASH, cur, amt: -amount }], { ref: p.id, memo: 'Refund after settlement' });
-        p.refunded += amount;
-      }
-    } else {
-      network = String(network || p.crypto.network).toUpperCase();
-      if (!P.NETWORKS[network]?.assets.includes(cur)) throw bad('Choose a refund network that supports this asset.');
-      if (!P.validAddress(network, address)) throw bad(`Customer ${network === 'BINANCE_PAY' ? 'Binance Pay ID' : 'address'} is not valid for ${P.NETWORKS[network].label}.`, 'address_invalid');
-      const nf = convert(Math.round(P.NETWORKS[network].payoutFeeUSD * 100), 'USD', cur);
-      if (L.balance(m.id, p.mode, ACCT.M_AVAIL, cur) < amount + nf) throw bad(`Available ${cur} must cover the refund plus the ${fmt(nf, cur)} network fee.`, 'insufficient_balance');
-      L.post(p.mode, `${p.id}:refund:${n}`, [{ acct: ACCT.M_AVAIL, mid: m.id, cur, amt: amount + nf }, { acct: ACCT.P_CUSTODY, cur, amt: -(amount + nf) }], { ref: p.id, memo: `Crypto refund on ${network} incl. network fee` });
-      p.refunded += amount; Object.assign(r, { network_fee: nf, address, network });
-      if (p.mode === 'live') r.status = 'pending_execution'; // treasury sends on-chain and records the hash
-      else r.tx_hash = (P.NETWORKS[network].addr === 'evm' ? '0x' : '') + rid(64, '0123456789abcdef');
-    }
-    if (r.kind === 'refund') { p.status = p.refunded >= (p.method === 'card' ? p.amount : p.creditedAmount) ? 'refunded' : 'partially_refunded'; addEvent(p, p.status, `Refund ${fmt(amount, cur)}`); }
-    store.put('payments', p); store.put('refunds', r);
-    audit(actor, 'refund.create', p.id, fmt(amount, cur), m.id);
-    emit(m.id, p.mode, 'refund.created', publicRefund(r)); emit(m.id, p.mode, 'payment.refunded', publicPayment(p));
+    const r = store.get('refunds', refundId); if (!r) return null;
+    r.cashapp_refund_id = cr.id; r.cashapp_status = cr.status;
+    const p = store.get('payments', r.payment_id);
+    if (cr.status === 'CAPTURED' && r.status !== 'succeeded') {
+      const acct = p.settled ? ACCT.M_AVAIL : ACCT.M_PENDING, counter = p.settled ? ACCT.P_CASH : ACCT.ACQ_RCV;
+      L.post(r.mode, `${r.id}:refund`, [{ acct, mid: r.merchant_id, cur: r.currency, amt: r.amount }, { acct: counter, cur: r.currency, amt: -r.amount }], { ref: p.id, memo: `Cash App refund ${cr.id}` });
+      if (!p.settled) { p.pendingRemaining -= r.amount; p.rcvRemaining -= r.amount; }
+      p.refunded += r.amount; p.status = p.refunded >= p.amount ? 'refunded' : 'partially_refunded';
+      addEvent(p, p.status, `Refund ${fmt(r.amount, r.currency)} captured by Cash App`); store.put('payments', p);
+      r.status = 'succeeded'; store.put('refunds', r);
+      emit(r.merchant_id, r.mode, 'refund.succeeded', publicRefund(r)); emit(r.merchant_id, r.mode, 'payment.refunded', publicPayment(p));
+    } else if ((cr.status === 'DECLINED' || cr.status === 'VOIDED') && r.status === 'pending') {
+      r.status = 'declined'; store.put('refunds', r); emit(r.merchant_id, r.mode, 'refund.failed', publicRefund(r));
+    } else store.put('refunds', r);
     return r;
   });
 }
-function openDispute(p, reason, actor) {
-  return store.tx(() => {
-    if (p.mode !== 'test') throw bad('Disputes arrive from the acquirer in live mode.');
-    if (p.method !== 'card' || !p.settled || !['settled', 'partially_refunded'].includes(p.status)) throw bad('Only settled card payments can be disputed.');
-    const m = merchant(p.merchant_id), amt = p.amount - p.refunded, fee = convert(m.fees.disputeFeeUSD, 'USD', p.currency);
-    const d = store.put('disputes', { id: id('dp'), merchant_id: m.id, mode: p.mode, status: 'needs_response', payment_id: p.id, amount: amt, fee, currency: p.currency, reason, due_at: now() + 7 * dayMs(p.mode), liability: p.card.threeDS?.liability });
-    L.post(p.mode, `${d.id}:open`, [{ acct: ACCT.M_AVAIL, mid: m.id, cur: p.currency, amt: amt + fee }, { acct: ACCT.P_CASH, cur: p.currency, amt: -(amt + fee) }], { ref: p.id, memo: `Chargeback ${reason} + fee` });
-    p.status = 'disputed'; addEvent(p, 'disputed', `Chargeback opened: ${reason}`); store.put('payments', p);
-    alert('medium', 'dispute', m.id, p.id, `Chargeback ${reason} ${fmt(amt, p.currency)}`, p.mode);
-    audit(actor, 'dispute.simulate', d.id, reason, m.id); emit(m.id, p.mode, 'dispute.created', { id: d.id, payment: p.id, amount: amt, reason });
-    return d;
-  });
-}
-function resolveDispute(d, won, actor) {
-  return store.tx(() => {
-    if (!['needs_response', 'under_review'].includes(d.status)) throw bad('Dispute already closed.');
-    const p = store.get('payments', d.payment_id);
-    if (won) { L.post(d.mode, `${d.id}:won`, [{ acct: ACCT.P_CASH, cur: d.currency, amt: d.amount }, { acct: ACCT.M_AVAIL, mid: d.merchant_id, cur: d.currency, amt: -d.amount }], { ref: p.id, memo: 'Dispute won' }); d.status = 'won'; p.status = p.refunded ? 'partially_refunded' : 'settled'; }
-    else { d.status = 'lost'; p.status = 'chargeback_lost'; }
-    addEvent(p, 'dispute_' + d.status); store.put('payments', p); store.put('disputes', d);
-    audit(actor, 'dispute.' + d.status, d.id, '', d.merchant_id); emit(d.merchant_id, d.mode, 'dispute.closed', { id: d.id, status: d.status });
-    return d;
-  });
+async function retryPendingRefunds() {
+  for (const r of store.list('refunds', { status: 'pending' }, { limit: 50 })) {
+    const p = store.get('payments', r.payment_id), m = merchant(r.merchant_id);
+    try {
+      const cr = r.cashapp_refund_id ? await CA.client(r.mode).retrieveRefund(r.cashapp_refund_id, { mid: m.id, op: 'retrieve_refund' })
+        : await CA.client(r.mode).createRefund({ idempotency_key: r.id, refund: { amount: r.amount, currency: 'USD', merchant_id: m.cashapp[r.mode].merchant_id, payment_id: p.cashapp.payment_id, capture: true, reference_id: r.id } }, { mid: m.id, op: 'create_refund' });
+      applyCashAppRefund(r.id, cr);
+    } catch (e) { if (!(e instanceof CA.CashAppError)) throw e; if (!e.retryable) { r.status = 'failed'; r.error = e.message; store.put('refunds', r); } }
+  }
 }
 
-/* ---------------- payouts ---------------- */
+/* ---------------- disputes (from Cash App) ---------------- */
+const DISPUTE_STATUS = { RESPONSE_REQUIRED: 'needs_response', NO_RESPONSE_REQUIRED: 'under_review', PROCESSING: 'under_review', ACCEPTED: 'lost', WON: 'won', PARTIALLY_WON: 'partially_won', LOST: 'lost' };
+function findByCashAppPayment(mode, cpid) { return store.list('payments', { mode }, { limit: 20000 }).find(p => p.cashapp?.payment_id === cpid) || null; }
+function applyCashAppDispute(mode, cd) {
+  return store.tx(() => {
+    let d = store.list('disputes', { mode }, { limit: 5000 }).find(x => x.cashapp_dispute_id === cd.id);
+    const p = d ? store.get('payments', d.payment_id) : findByCashAppPayment(mode, cd.payment_id);
+    if (!p) return null;
+    if (!d) {
+      d = { id: id('dp'), merchant_id: p.merchant_id, mode, payment_id: p.id, cashapp_dispute_id: cd.id, amount: cd.amount, currency: p.currency, reason: cd.reason, returned: 0, evidence: [] };
+      L.post(mode, `${d.id}:open`, [{ acct: ACCT.M_AVAIL, mid: p.merchant_id, cur: p.currency, amt: cd.amount }, { acct: ACCT.P_CASH, cur: p.currency, amt: -cd.amount }], { ref: p.id, memo: `Cash App dispute ${cd.reason}` });
+      p.status = 'disputed'; addEvent(p, 'disputed', `Cash App dispute ${cd.id} opened (${cd.reason})`); store.put('payments', p);
+      alert('medium', 'dispute', p.merchant_id, p.id, `Dispute ${cd.reason} ${fmt(cd.amount, p.currency)}`, mode);
+      emit(p.merchant_id, mode, 'dispute.created', publicDispute({ ...d, status: DISPUTE_STATUS[cd.state], state: cd.state }));
+    }
+    const prev = d.state;
+    Object.assign(d, { state: cd.state, status: DISPUTE_STATUS[cd.state] || 'under_review', response_due_at: cd.response_due_at ? Date.parse(cd.response_due_at) : d.response_due_at || null });
+    if (prev !== cd.state && ['WON', 'PARTIALLY_WON'].includes(cd.state) && !d.returned) {
+      const back = cd.state === 'WON' ? d.amount : Math.max(0, d.amount - (cd.customer_credited_amount || 0));
+      if (back) L.post(mode, `${d.id}:returned`, [{ acct: ACCT.P_CASH, cur: d.currency, amt: back }, { acct: ACCT.M_AVAIL, mid: d.merchant_id, cur: d.currency, amt: -back }], { ref: p.id, memo: `Dispute ${cd.state.toLowerCase().replace('_', ' ')}` });
+      d.returned = back; p.status = p.refunded ? 'partially_refunded' : (p.settled ? 'settled' : 'captured'); addEvent(p, 'dispute_won', `Dispute ${cd.state}; ${fmt(back, d.currency)} returned`); store.put('payments', p);
+    }
+    if (prev !== cd.state && ['LOST', 'ACCEPTED'].includes(cd.state)) { p.status = 'chargeback_lost'; addEvent(p, 'chargeback_lost', `Dispute ${cd.state.toLowerCase()}`); store.put('payments', p); }
+    store.put('disputes', d);
+    if (prev && prev !== cd.state) emit(d.merchant_id, mode, 'dispute.updated', publicDispute(d));
+    return d;
+  });
+}
+async function disputeAction(d, action, { text, category } = {}, actor) {
+  if (d.status !== 'needs_response') throw bad('This dispute no longer accepts a response.');
+  const api = CA.client(d.mode), opt = { mid: d.merchant_id, op: 'dispute_' + action };
+  if (action === 'evidence') {
+    const t = U.str(text, 500); if (t.length < 10) throw bad('Describe your evidence (10–500 characters).');
+    const cat = /^[A-Z_]{3,60}$/.test(category || '') ? category : 'GENERIC_EVIDENCE';
+    await api.createDisputeEvidenceText(d.cashapp_dispute_id, { idempotency_key: id('dev'), evidence: { category: cat, text: t } }, opt).catch(caError);
+    d.evidence.push({ at: now(), category: cat, text: t }); store.put('disputes', d); audit(actor, 'dispute.evidence', d.id, cat, d.merchant_id); return d;
+  }
+  const cd = await (action === 'accept' ? api.acceptDispute(d.cashapp_dispute_id, opt) : api.challengeDispute(d.cashapp_dispute_id, opt)).catch(caError);
+  audit(actor, 'dispute.' + action, d.id, '', d.merchant_id);
+  return applyCashAppDispute(d.mode, cd);
+}
+
+/* ---------------- inbound Cash App events ---------------- */
+async function handleCashAppEvent(evt, mode) {
+  const obj = evt.data?.object || {};
+  if (obj.request) {
+    const p = store.byKey('payments', obj.request.id);
+    if (p && p.mode === mode && p.status === 'awaiting_customer') {
+      // Webhook payloads may omit grants: fetch the request to read them.
+      const full = obj.request.status === 'APPROVED' && !obj.request.grants?.length ? await CA.client(mode).retrieveCustomerRequest(obj.request.id, { mid: p.merchant_id, op: 'retrieve_request' }) : obj.request;
+      await applyCustomerRequest(p, full);
+    }
+    return { handled: 'customer_request', payment: p?.id || null };
+  }
+  if (obj.payment) {
+    const p = store.get('payments', obj.payment.reference_id) || findByCashAppPayment(mode, obj.payment.id);
+    if (p && p.mode === mode) applyCashAppPayment(p, obj.payment);
+    return { handled: 'payment', payment: p?.id || null };
+  }
+  if (obj.refund) {
+    const r = store.get('refunds', obj.refund.reference_id) || store.list('refunds', { mode }, { limit: 5000 }).find(x => x.cashapp_refund_id === obj.refund.id);
+    if (r && r.mode === mode) applyCashAppRefund(r.id, obj.refund);
+    return { handled: 'refund', refund: r?.id || null };
+  }
+  if (obj.dispute) { const d = applyCashAppDispute(mode, obj.dispute); return { handled: 'dispute', dispute: d?.id || null }; }
+  if (obj.merchant) {
+    const m = store.list('merchants', {}, { limit: 10000 }).map(normalizeMerchant).find(x => x.cashapp[mode]?.merchant_id === obj.merchant.id);
+    if (m) { m.cashapp[mode].status = obj.merchant.status; store.put('merchants', m); audit('cashapp', 'cashapp.merchant_status', m.id, obj.merchant.status, m.id); }
+    return { handled: 'merchant', merchant: m?.id || null };
+  }
+  return { handled: 'ignored' };
+}
+const simQueue = [];
+CA.setSimEventSink(e => simQueue.push(e));
+async function flushSimEvents() {
+  while (simQueue.length) {
+    const e = simQueue.shift();
+    store.put('provider_events', { id: id('pev'), k: `cashapp:test:${e.event_id}`, status: 'processed', provider: 'cashapp', mode: 'test', type: e.type, sig: 'simulator', payment_id: null });
+    await handleCashAppEvent(e, 'test');
+  }
+}
+
+/* ---------------- settlement ----------------
+   Cash App settles to the partner; the wallet moves funds pending → available when a settlement is
+   recorded. Test mode settles automatically after two sandbox days so the flow can be exercised. */
+function settlePayment(p, memo, reference) {
+  return store.tx(() => {
+    if (p.settled || !['captured', 'partially_refunded', 'refunded', 'disputed'].includes(p.status) || p.method !== 'cashapp') return false;
+    const m = merchant(p.merchant_id), pend = p.pendingRemaining, reserve = pct(pend, m.reserve.pct);
+    L.post(p.mode, `${p.id}:settle`, [
+      { acct: ACCT.P_CASH, cur: p.currency, amt: p.rcvRemaining }, { acct: ACCT.ACQ_RCV, cur: p.currency, amt: -p.rcvRemaining },
+      { acct: ACCT.M_PENDING, mid: m.id, cur: p.currency, amt: pend }, { acct: ACCT.M_AVAIL, mid: m.id, cur: p.currency, amt: -(pend - reserve) }, { acct: ACCT.M_RESERVE, mid: m.id, cur: p.currency, amt: -reserve },
+    ], { ref: p.id, memo });
+    Object.assign(p, { settled: true, settled_at: now(), settlement_ref: reference || null, reserve, reserve_release_at: now() + m.reserve.days * dayMs(p.mode), pendingRemaining: 0, rcvRemaining: 0 });
+    if (p.status === 'captured') p.status = 'settled';
+    addEvent(p, 'settled', `${fmt(pend - reserve, p.currency)} available, ${fmt(reserve, p.currency)} reserve${reference ? ` · ref ${reference}` : ''}`); store.put('payments', p);
+    return true;
+  });
+}
+/** Admin records a Cash App settlement: every captured, unsettled payment (optionally one merchant) up to `before`. */
+function recordSettlement({ mode, merchantId, before, reference }, actor) {
+  const ref = U.str(reference, 120); if (!ref) throw bad('Enter the Cash App settlement reference.');
+  const cutoff = Number(before) || now(); let n = 0, total = 0;
+  for (const p of store.list('payments', { mode, ...(merchantId ? { merchant_id: merchantId } : {}), status: ['captured', 'partially_refunded', 'refunded', 'disputed'] }, { limit: 20000, asc: true })) {
+    if (p.method !== 'cashapp' || p.settled || p.captured_at > cutoff) continue;
+    const pend = p.pendingRemaining; if (settlePayment(p, `Cash App settlement ${ref}`, ref)) { n++; total += pend; }
+  }
+  audit(actor, 'settlement.record', ref, `${n} payments, ${fmt(total, 'USD')} net`, merchantId || null);
+  return { settled: n, net_total: total, reference: ref };
+}
+function runSettlement(mode) {
+  let settled = 0, released = 0;
+  if (mode === 'test') for (const p of store.list('payments', { mode, status: ['captured', 'partially_refunded', 'refunded'] }, { limit: 2000, asc: true })) {
+    if (p.settled || now() - p.captured_at < 2 * dayMs(mode)) continue;
+    if (settlePayment(p, 'Sandbox settlement (simulated)')) settled++;
+  }
+  for (const p of store.list('payments', { mode, status: ['settled', 'partially_refunded', 'refunded', 'disputed', 'chargeback_lost'] }, { limit: 5000, asc: true })) {
+    if (!p.reserve || p.reserve_released || now() < p.reserve_release_at) continue;
+    store.tx(() => { L.post(mode, `${p.id}:reserve_release`, [{ acct: ACCT.M_RESERVE, mid: p.merchant_id, cur: p.currency, amt: p.reserve }, { acct: ACCT.M_AVAIL, mid: p.merchant_id, cur: p.currency, amt: -p.reserve }], { ref: p.id, memo: 'Rolling reserve released' }); p.reserve_released = true; store.put('payments', p); released++; });
+  }
+  return { settled, released };
+}
+
+/* ---------------- payouts (merchant wallet → bank) ---------------- */
 function destination(m, destId) {
-  const d = store.get('wallets', destId) || store.get('banks', destId);
-  if (!d || d.merchant_id !== m.id) throw bad('Choose a payout destination.');
-  if (d.status !== 'verified') throw bad('That destination is not verified yet.');
+  const d = store.get('banks', destId);
+  if (!d || d.merchant_id !== m.id) throw bad('Choose a payout bank account.');
+  if (d.status !== 'verified') throw bad('That bank account is not verified yet.');
   return d;
 }
 function payoutQuote(m, mode, sourceCur, amount, destId) {
   assertMode(m, mode);
   if (!m.perms.payouts) throw new HttpError(403, 'payouts_disabled', 'Payouts are disabled for this account.');
   if (m.settlementHold) throw new HttpError(403, 'settlement_hold', `Settlement hold: ${m.settlementHold.reason}`);
-  if (!CURRENCIES[sourceCur]) throw bad('Unknown currency.');
+  if (!FIAT.includes(sourceCur)) throw bad('Unknown currency.');
   if (!Number.isInteger(amount) || amount <= 0) throw bad('Enter an amount.');
-  const dest = destination(m, destId), destCur = dest.asset || dest.currency;
-  if (destCur === 'PKR' && U.CURRENCIES[sourceCur].crypto) throw bad('Stablecoin → PKR is not offered: it needs SBP / PVARA clearance and bank approval.', 'corridor_unavailable');
-  if (destCur === 'PKR' && mode === 'live' && m.providers.soneri !== 'approved') throw bad('PKR settlement via Soneri Bank is not authorized for this account yet.');
-  if (dest.asset && !U.CURRENCIES[sourceCur].crypto) throw bad('Fiat balances cannot be paid out as stablecoins.', 'corridor_unavailable');
-  const spread = sourceCur === destCur ? 0 : m.fees.fxSpreadBps, gross = convert(amount, sourceCur, destCur, spread);
-  const fee = dest.asset ? convert(Math.round(P.NETWORKS[dest.network].payoutFeeUSD * 100), 'USD', destCur) : ({ USD: 500, EUR: 100, GBP: 50, AED: 1000, PKR: 2500 }[destCur] ?? 500);
+  const dest = destination(m, destId), destCur = dest.currency;
+  const spread = sourceCur === destCur ? 0 : 25, gross = convert(amount, sourceCur, destCur, spread);
+  const fee = { USD: 500, EUR: 100, GBP: 50, AED: 1000, PKR: 2500 }[destCur] ?? 500;
   const reasons = [];
-  if (dest.asset) reasons.push('Crypto payouts are irreversible');
   if (toUSD(amount, sourceCur) > platform().approvalThresholdUSD) reasons.push(`Above ${fmt(platform().approvalThresholdUSD, 'USD')}`);
   if (m.risk === 'high') reasons.push('Merchant risk tier high');
   if (m.dualControl) reasons.push('Merchant dual control');
+  if (mode === 'live') reasons.push('Live payouts are executed by Digital Hub treasury');
   return { sourceCur, amount, destCur, dest, spreadBps: spread, gross, fee, receive: gross - fee, rate: CURRENCIES[destCur].fx / CURRENCIES[sourceCur].fx * (1 - spread / 10000), reasons };
 }
 function requestPayout(m, mode, { currency, amount, destination: destId }, actor) {
@@ -484,7 +564,7 @@ function requestPayout(m, mode, { currency, amount, destination: destId }, actor
     if (q.amount > avail) throw bad(`Only ${fmt(avail, q.sourceCur)} is available.`, 'insufficient_balance');
     if (q.amount < m.minPayout && q.sourceCur === q.destCur) throw bad(`Minimum payout is ${fmt(m.minPayout, q.sourceCur)}.`);
     const po = { id: id('po'), merchant_id: m.id, mode, status: q.reasons.length ? 'pending_approval' : 'processing', amount: q.amount, currency: q.sourceCur, dest_currency: q.destCur, dest_id: q.dest.id,
-      dest_label: q.dest.asset ? `${q.dest.asset} · ${P.NETWORKS[q.dest.network].label} · ${q.dest.address.slice(0, 6)}…${q.dest.address.slice(-4)}` : `${q.dest.bank_name} ••${q.dest.last4}${q.dest.rail ? ' · ' + q.dest.rail : ''}`,
+      dest_label: `${q.dest.bank_name} ••${q.dest.last4}${q.dest.rail ? ' · ' + q.dest.rail : ''}`,
       rate: q.rate, spread_bps: q.spreadBps, fee: q.fee, receive: q.receive, reasons: q.reasons, actor, events: [{ at: now(), status: 'requested', note: q.reasons.join('; ') || 'Auto-approved' }] };
     L.post(mode, `${po.id}:hold`, [{ acct: ACCT.M_AVAIL, mid: m.id, cur: q.sourceCur, amt: q.amount }, { acct: ACCT.M_HOLD, mid: m.id, cur: q.sourceCur, amt: -q.amount }], { ref: po.id, memo: 'Payout requested; funds on hold' });
     store.put('payouts', po); audit(actor, 'payout.request', po.id, `${fmt(q.amount, q.sourceCur)} → ${fmt(q.receive, q.destCur)}`, m.id);
@@ -502,13 +582,13 @@ function approvePayout(po, actor) {
     return po;
   });
 }
-/** Live: treasury executes the transfer outside the platform, then records the reference here. */
+/** Live: treasury sends the bank transfer outside the platform, then records the reference here. */
 function completePayout(po, actor, reference) {
   return store.tx(() => {
     if (po.status !== 'processing') throw bad('Payout is not processing.');
-    if (po.mode === 'live' && !U.str(reference)) throw bad('Enter the transaction hash or bank reference.');
-    L.post(po.mode, `${po.id}:sent`, [{ acct: ACCT.M_HOLD, mid: po.merchant_id, cur: po.currency, amt: po.amount }, { acct: U.CURRENCIES[po.currency].crypto ? ACCT.P_CUSTODY : ACCT.P_CASH, cur: po.currency, amt: -po.amount }], { ref: po.id, memo: 'Payout sent' });
-    po.status = 'completed'; po.reference = U.str(reference, 120) || (U.CURRENCIES[po.dest_currency].crypto ? '0x' + rid(64, '0123456789abcdef') : 'SBX' + rid(12, '0123456789'));
+    if (po.mode === 'live' && !U.str(reference)) throw bad('Enter the bank transfer reference.');
+    L.post(po.mode, `${po.id}:sent`, [{ acct: ACCT.M_HOLD, mid: po.merchant_id, cur: po.currency, amt: po.amount }, { acct: ACCT.P_CASH, cur: po.currency, amt: -po.amount }], { ref: po.id, memo: 'Payout sent' });
+    po.status = 'completed'; po.reference = U.str(reference, 120) || 'SBX' + rid(12, '0123456789');
     po.events.push({ at: now(), status: 'completed', note: `Reference ${po.reference}` }); store.put('payouts', po);
     audit(actor, 'payout.complete', po.id, po.reference, po.merchant_id); emit(po.merchant_id, po.mode, 'payout.paid', publicPayout(po));
     return po;
@@ -546,33 +626,19 @@ async function idempotent(mid, mode, key, fingerprint, fn) {
 }
 
 /* ---------------- background jobs ---------------- */
-function runSettlement(mode) {
-  let settled = 0, released = 0;
-  for (const p of store.list('payments', { mode, status: ['captured', 'partially_refunded'] }, { limit: 2000, asc: true })) {
-    if (p.method !== 'card' || p.settled || now() - p.captured_at < 2 * dayMs(mode)) continue;
-    store.tx(() => {
-      const m = merchant(p.merchant_id), pend = p.pendingRemaining, reserve = pct(pend, m.reserve.pct);
-      L.post(mode, `${p.id}:settle`, [
-        { acct: ACCT.P_CASH, cur: p.currency, amt: p.rcvRemaining }, { acct: ACCT.ACQ_RCV, cur: p.currency, amt: -p.rcvRemaining },
-        { acct: ACCT.M_PENDING, mid: m.id, cur: p.currency, amt: pend }, { acct: ACCT.M_AVAIL, mid: m.id, cur: p.currency, amt: -(pend - reserve) }, { acct: ACCT.M_RESERVE, mid: m.id, cur: p.currency, amt: -reserve },
-      ], { ref: p.id, memo: `Acquirer settlement; ${m.reserve.pct}% reserve` });
-      Object.assign(p, { settled: true, settled_at: now(), reserve, reserve_release_at: now() + m.reserve.days * dayMs(mode), pendingRemaining: 0 });
-      if (p.status === 'captured') p.status = 'settled';
-      addEvent(p, 'settled', `${fmt(pend - reserve, p.currency)} available, ${fmt(reserve, p.currency)} reserve`); store.put('payments', p); settled++;
-    });
+async function runCashAppSync() {
+  for (const p of store.list('payments', { status: [...IN_FLIGHT, 'authorized'] }, { limit: 40, asc: true })) {
+    if (p.method !== 'cashapp') continue;
+    if (p.status === 'authorized' && now() - (p.cashapp.last_sync || 0) < 60000) continue;
+    await syncPayment(p);
   }
-  for (const p of store.list('payments', { mode, status: ['settled', 'partially_refunded', 'refunded', 'disputed', 'chargeback_lost'] }, { limit: 5000, asc: true })) {
-    if (!p.reserve || p.reserve_released || now() < p.reserve_release_at) continue;
-    store.tx(() => { L.post(mode, `${p.id}:reserve_release`, [{ acct: ACCT.M_RESERVE, mid: p.merchant_id, cur: p.currency, amt: p.reserve }, { acct: ACCT.M_AVAIL, mid: p.merchant_id, cur: p.currency, amt: -p.reserve }], { ref: p.id, memo: 'Rolling reserve released' }); p.reserve_released = true; store.put('payments', p); released++; });
-  }
-  for (const p of store.list('payments', { mode, status: 'authorized' })) if (now() > p.auth_expires_at) { p.status = 'canceled'; addEvent(p, 'canceled', 'Authorization expired'); store.put('payments', p); }
-  return { settled, released };
+  await retryPendingRefunds();
+  CA.sim.runDisputes();
+  await flushSimEvents();
 }
 function runExpiry() {
-  for (const p of store.list('payments', { status: 'awaiting_payment' }, { limit: 1000 })) if (p.crypto && now() > p.crypto.expiresAt && p.crypto.provider === 'sandbox') cryptoExpire(p);
   for (const s of store.list('checkout_sessions', { status: 'open' }, { limit: 1000, asc: true })) if (now() > s.expires_at) { s.status = 'expired'; store.put('checkout_sessions', s); emit(s.merchant_id, s.mode, 'checkout.session.expired', publicSession(s)); }
 }
-function runSandboxConfirmations() { for (const p of store.list('payments', { mode: 'test', status: 'confirming' })) cryptoTick(p); }
 
 function privateIp(ip) {
   if (net.isIPv6(ip)) return ip === '::1' || /^f[cd]/i.test(ip) || /^fe80/i.test(ip) || ip.startsWith('::ffff:') && privateIp(ip.slice(7));
@@ -614,25 +680,25 @@ function reconChecks(mode) {
   const out = [], eq = (a, b) => [...new Set([...Object.keys(a), ...Object.keys(b)])].every(k => (a[k] || 0) === (b[k] || 0));
   const tb = L.trialBalance(mode);
   out.push({ name: 'Every journal balances', ok: tb.every(r => r.debits === r.credits), detail: 'Debits equal credits in every currency.' });
-  const pays = store.list('payments', { mode }, { limit: 100000 }), rcv = {}, susp = {}, over = {}, pend = {};
+  const pays = store.list('payments', { mode }, { limit: 100000 }), rcv = {}, pend = {};
   for (const p of pays) {
-    if (p.method === 'card' && !p.settled && p.rcvRemaining) rcv[p.currency] = (rcv[p.currency] || 0) + p.rcvRemaining;
-    if (p.method === 'card' && !p.settled && p.pendingRemaining) pend[p.currency] = (pend[p.currency] || 0) - p.pendingRemaining;
-    if (p.crypto && ['confirming', 'underpaid'].includes(p.status)) susp[p.crypto.asset] = (susp[p.crypto.asset] || 0) - p.crypto.received;
-    if (p.crypto?.excess) over[p.crypto.asset] = (over[p.crypto.asset] || 0) - p.crypto.excess;
+    if (p.settled) continue;
+    if (p.rcvRemaining) rcv[p.currency] = (rcv[p.currency] || 0) + p.rcvRemaining;
+    if (p.pendingRemaining) pend[p.currency] = (pend[p.currency] || 0) - p.pendingRemaining;
   }
-  out.push({ name: 'Acquirer receivable = unsettled captures', ok: eq(L.sumAccount(mode, ACCT.ACQ_RCV), rcv), detail: 'Money owed by the acquirer matches captured, unsettled card payments.' });
-  out.push({ name: 'Merchant pending = unsettled net', ok: eq(L.sumAccount(mode, ACCT.M_PENDING), pend), detail: 'Pending balances equal net of unsettled captures.' });
-  out.push({ name: 'Customer suspense = unconfirmed crypto', ok: eq(L.sumAccount(mode, ACCT.C_SUSPENSE), susp), detail: 'Detected but unconfirmed funds stay outside merchant balances.' });
-  out.push({ name: 'Overpayment liability = unreturned excess', ok: eq(L.sumAccount(mode, ACCT.C_OVERPAY), over), detail: 'Excess crypto owed back to customers.' });
+  out.push({ name: 'Cash App receivable = captured, unsettled payments', ok: eq(L.sumAccount(mode, ACCT.ACQ_RCV), rcv), detail: 'Money owed by Cash App matches captured payments not yet settled.' });
+  out.push({ name: 'Merchant pending = unsettled net', ok: eq(L.sumAccount(mode, ACCT.M_PENDING), pend), detail: 'Pending wallet balances equal net of unsettled captures.' });
   const hold = {}; for (const po of store.list('payouts', { mode, status: ['pending_approval', 'processing'] }, { limit: 100000 })) hold[po.currency] = (hold[po.currency] || 0) - po.amount;
   out.push({ name: 'Payout holds = payouts in flight', ok: eq(L.sumAccount(mode, ACCT.M_HOLD), hold), detail: 'Held funds match payouts awaiting approval or execution.' });
+  const stuck = pays.filter(p => p.status === 'processing' && now() - p.created_at > 15 * 60000).length;
+  out.push({ name: 'No Cash App payments stuck in processing', ok: true, warn: stuck > 0, detail: stuck ? `${stuck} payment(s) approved by the customer but not confirmed by Cash App for 15+ minutes.` : 'Every approved request has a confirmed Cash App payment.' });
   const neg = store.list('merchants', {}, { limit: 10000 }).flatMap(m => Object.entries(L.merchantBalances(m.id, mode)).filter(([, b]) => b.available < 0).map(([c]) => `${m.name} ${c}`));
   out.push({ name: 'No negative available balances', ok: true, warn: neg.length > 0, detail: neg.length ? 'Negative: ' + neg.join(', ') : 'All available balances are zero or positive.' });
   return out;
 }
 
-module.exports = { PAID, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, merchant, kybReady, liveReady, assertMode, methodAvailable, cryptoOptions,
-  controlCheck, non3dsAuthorized, feeQuote, publicSession, publicPayment, publicRefund, publicLink, publicPayout, createSession, createLink, linkActive, cardPay, complete3DS, capture, cancel,
-  cryptoStart, cryptoDetected, cryptoTick, cryptoExpire, acceptPartial, providerPaid, maxRefundable, refund, openDispute, resolveDispute, payoutQuote, requestPayout, approvePayout,
-  completePayout, rejectPayout, adjust, idempotent, runSettlement, runExpiry, runSandboxConfirmations, runDeliveries, assertWebhookTarget, reconChecks, STABLE, FIAT };
+module.exports = { PAID, IN_FLIGHT, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, normalizeMerchant, merchant, kybReady, liveReady, cashappReady, assertMode, methodAvailable,
+  validateDetails, registerCashApp, controlCheck, publicSession, publicPayment, publicRefund, publicLink, publicPayout, publicDispute, createSession, createLink, linkActive,
+  startCashApp, syncPayment, applyCashAppPayment, applyCashAppRefund, applyCashAppDispute, handleCashAppEvent, flushSimEvents, capture, cancel, maxRefundable, refund, disputeAction,
+  settlePayment, recordSettlement, payoutQuote, requestPayout, approvePayout, completePayout, rejectPayout, adjust, idempotent,
+  runSettlement, runExpiry, runCashAppSync, runDeliveries, assertWebhookTarget, reconChecks, FIAT };

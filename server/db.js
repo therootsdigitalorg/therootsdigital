@@ -8,8 +8,8 @@ const path = require('node:path');
 const config = require('./config');
 
 const DOCS = ['merchants', 'users', 'sessions', 'api_keys', 'checkout_sessions', 'payments', 'refunds', 'disputes', 'payouts', 'links', 'wallets', 'banks',
-  'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit'];
-const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events']);
+  'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit', 'cashapp_sim', 'api_logs'];
+const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events', 'cashapp_sim']);
 const usePg = !!config.databaseUrl;
 let driver = null;
 /** Opens the database on first use: Postgres when DATABASE_URL is set, otherwise local SQLite. */

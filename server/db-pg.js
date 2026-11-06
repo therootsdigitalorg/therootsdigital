@@ -7,7 +7,7 @@ const path = require('node:path');
 const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const config = require('./config');
 
-const SCHEMA = 'digitalhub', SCHEMA_VERSION = 1, TIMEOUT_MS = 30000;
+const SCHEMA = 'digitalhub', SCHEMA_VERSION = 2, TIMEOUT_MS = 30000;
 
 function sslFor(u) {
   if (config.databaseCa) return { ca: config.databaseCa };

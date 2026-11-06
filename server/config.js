@@ -58,6 +58,11 @@ module.exports = {
   allowPrivateWebhooks: !production && flag('ALLOW_PRIVATE_WEBHOOKS', true),
   livePayments: flag('LIVE_PAYMENTS', false),
   secureCookies: publicUrl.startsWith('https://'),
-  binance: { base: env('BINANCE_PAY_BASE', 'https://bpay.binanceapi.com'), apiKey: env('BINANCE_PAY_API_KEY'), secretKey: env('BINANCE_PAY_SECRET_KEY'), publicKey: env('BINANCE_PAY_PUBLIC_KEY').replace(/\\n/g, '\n') },
-  coinbase: { base: env('COINBASE_API_BASE', 'https://api.commerce.coinbase.com'), apiKey: env('COINBASE_API_KEY'), webhookSecret: env('COINBASE_WEBHOOK_SECRET') },
+  // Cash App Pay Partner API credentials (server-side only). Sandbox and production are separate credential sets.
+  cashapp: {
+    region: env('CASHAPP_REGION', 'PDX'),
+    userAgent: 'DigitalHub/1.0',
+    sandbox: { clientId: env('CASHAPP_SANDBOX_CLIENT_ID'), keyId: env('CASHAPP_SANDBOX_API_KEY_ID'), keySecret: env('CASHAPP_SANDBOX_API_KEY_SECRET'), webhookSecret: env('CASHAPP_SANDBOX_WEBHOOK_SECRET'), base: env('CASHAPP_SANDBOX_BASE') },
+    live: { clientId: env('CASHAPP_CLIENT_ID'), keyId: env('CASHAPP_API_KEY_ID'), keySecret: env('CASHAPP_API_KEY_SECRET'), webhookSecret: env('CASHAPP_WEBHOOK_SECRET'), base: env('CASHAPP_BASE') },
+  },
 };

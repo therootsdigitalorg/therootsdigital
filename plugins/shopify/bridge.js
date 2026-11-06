@@ -1,7 +1,7 @@
 'use strict';
 /* Digital Hub ⇄ Shopify bridge (zero dependencies, Node 18+).
    Shopify only lists third-party gateways at checkout for approved Payments Partners. Until then:
-   1) Store uses a MANUAL payment method, e.g. "Card or USDT/USDC (Digital Hub)".
+   1) Store uses a MANUAL payment method, e.g. "Cash App Pay (Digital Hub)".
    2) Customer gets a pay link: GET /pay/:orderId?email=… (put it in the order-confirmation email / status page).
    3) Bridge creates a Digital Hub checkout for the order's outstanding amount and redirects the customer.
    4) Digital Hub's signed webhook (checkout.session.completed) → bridge marks the Shopify order paid. */
@@ -56,8 +56,11 @@ http.createServer(async (req, res) => {
       const raw = await new Promise(r => { const c = []; req.on('data', d => c.push(d)); req.on('end', () => r(Buffer.concat(c).toString('utf8'))); });
       if (!verifyDH(raw, req.headers['digitalhub-signature'])) return send(400, 'bad signature');
       const evt = JSON.parse(raw); if (seen.has(evt.id)) return send(200, 'duplicate'); seen.add(evt.id);
-      const s = evt.data?.object;
-      if (evt.type === 'checkout.session.completed' && s?.metadata?.shopify_order_id && s.metadata.shop === CFG.shop) {
+      const hinted = evt.data?.object;
+      // Re-read the session from Digital Hub and require a captured (paid) Cash App payment, never just "completed"
+      // (a manual-capture payment completes the session as "authorized" first).
+      const s = evt.type === 'checkout.session.completed' && hinted?.id ? await digitalhub('GET', `/checkout/sessions/${encodeURIComponent(hinted.id)}`) : null;
+      if (s && s.status === 'complete' && s.payment_status === 'paid' && s.metadata?.shopify_order_id && s.metadata.shop === CFG.shop) {
         const { order } = await shopify(ORDER_Q, { id: s.metadata.shopify_order_id });
         const due = order && Math.round(Number(order.totalOutstandingSet.shopMoney.amount) * 100);
         if (order && order.displayFinancialStatus !== 'PAID' && due === s.amount && order.totalOutstandingSet.shopMoney.currencyCode === s.currency) {

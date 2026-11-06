@@ -9,8 +9,8 @@ const core = require('../core');
 const { HttpError, bad } = U;
 
 const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
-const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created',
-  'crypto.payment.created', 'crypto.payment.detected', 'crypto.payment.underpaid', 'crypto.payment.expired', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.closed'];
+const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.succeeded', 'refund.failed',
+  'payment.created', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.updated'];
 
 const rate = new Map();
 function authenticate(ctx) {
@@ -21,7 +21,7 @@ function authenticate(ctx) {
   if (!/^dh_(test|live)_(sk|pk)_[A-Za-z0-9]{24,64}$/.test(token)) throw new HttpError(401, 'api_key_missing', 'Provide a valid API key: Authorization: Bearer dh_test_sk_…');
   const key = store.byKey('api_keys', U.sha256(token));
   if (!key || !(key.status === 'active' || (key.status === 'expiring' && Date.now() < key.expires_at))) throw new HttpError(401, 'api_key_invalid', 'This API key is invalid or revoked.');
-  const m = store.get('merchants', key.merchant_id);
+  const m = core.normalizeMerchant(store.get('merchants', key.merchant_id));
   if (!m?.perms.api) throw new HttpError(403, 'api_disabled', 'API access is disabled for this account.');
   if (key.allowed_ips?.length && !key.allowed_ips.includes(ctx.ip)) throw new HttpError(403, 'ip_not_allowed', 'Request IP is not on this key\'s allowlist.');
   core.assertMode(m, key.mode);
@@ -53,7 +53,7 @@ function routes(r) {
   const actor = a => `api:${a.key.prefix}…${a.key.last4}`;
 
   get('/v1/account', 'payments:read', (ctx, a) => ({ id: a.m.id, object: 'account', name: a.m.name, country: a.m.country, status: a.m.status, livemode: a.mode === 'live',
-    payment_methods: ['card', 'crypto'].filter(x => core.methodAvailable(a.m, a.mode, x)), crypto_options: core.cryptoOptions(a.m).map(([asset, network]) => ({ asset, network })) }));
+    payment_methods: core.methodAvailable(core.normalizeMerchant(a.m), a.mode) ? ['cashapp'] : [], currencies: ['USD'] }));
 
   post('/v1/checkout/sessions', 'checkout:write', (ctx, a) => core.publicSession(core.createSession(a.m, a.mode, ctx.body, actor(a))));
   get('/v1/checkout/sessions/:id', 'checkout:read', (ctx, a) => core.publicSession(owned('checkout_sessions', ctx.params.id, a)));
@@ -61,12 +61,12 @@ function routes(r) {
 
   get('/v1/payments', 'payments:read', (ctx, a) => listOf(store.list('payments', { merchant_id: a.m.id, mode: a.mode, ...(ctx.query.status ? { status: ctx.query.status } : {}) }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicPayment, lim(ctx.query)));
   get('/v1/payments/:id', 'payments:read', (ctx, a) => core.publicPayment(owned('payments', ctx.params.id, a)));
-  post('/v1/payments/:id/capture', 'payments:write', (ctx, a) => core.publicPayment(core.capture(owned('payments', ctx.params.id, a), actor(a))));
-  post('/v1/payments/:id/cancel', 'payments:write', (ctx, a) => core.publicPayment(core.cancel(owned('payments', ctx.params.id, a), actor(a))));
+  post('/v1/payments/:id/capture', 'payments:write', async (ctx, a) => core.publicPayment(await core.capture(owned('payments', ctx.params.id, a), actor(a))));
+  post('/v1/payments/:id/cancel', 'payments:write', async (ctx, a) => core.publicPayment(await core.cancel(owned('payments', ctx.params.id, a), actor(a))));
 
-  post('/v1/refunds', 'refunds:write', (ctx, a) => {
+  post('/v1/refunds', 'refunds:write', async (ctx, a) => {
     const p = owned('payments', ctx.body.payment, a);
-    return core.publicRefund(core.refund(p, ctx.body.amount == null ? null : Number(ctx.body.amount), { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address, network: ctx.body.network }));
+    return core.publicRefund(await core.refund(p, ctx.body.amount == null ? null : Number(ctx.body.amount), { actor: actor(a), reason: ctx.body.reason }));
   });
   get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicRefund, lim(ctx.query)));
 

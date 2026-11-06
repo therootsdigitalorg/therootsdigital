@@ -20,11 +20,11 @@ const COUNTRIES = { US: 'United States', GB: 'United Kingdom', DE: 'Germany', FR
 const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'];
 
 const TONE = {
-  ok: ['settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
+  ok: ['partially_won', 'settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
   accent: ['captured'],
-  info: ['authorized', 'confirming', 'processing', 'awaiting_payment', 'requires_action', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test'],
-  warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid'],
-  danger: ['declined', 'failed', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no'],
+  info: ['awaiting_customer', 'approved_by_customer', 'authorized', 'confirming', 'processing', 'awaiting_payment', 'requires_action', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test'],
+  warn: ['not_registered', 'expired', 'pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid'],
+  danger: ['risk_disabled', 'compliance_disabled', 'client_disabled', 'declined', 'failed', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no'],
 };
 function badge(status, label) {
   const tone = Object.entries(TONE).find(([, v]) => v.includes(status))?.[0];
@@ -53,7 +53,7 @@ function barChart(series) {
     g += `<rect x="${x}" y="${yc}" width="${w}" height="${H - padB - yc}" fill="var(--accent)" rx="2"><title>${s.label}: card ${fmt(s.card, 'USD')}</title></rect>`;
     if (s.crypto) g += `<rect x="${x}" y="${yk}" width="${w}" height="${yc - yk}" fill="var(--warn)" rx="2"><title>${s.label}: crypto ${fmt(s.crypto, 'USD')}</title></rect>`;
     if (i % 2 === 0) g += `<text x="${x + w / 2}" y="${H - 8}" text-anchor="middle">${s.label}</text>`; });
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend"><span><i style="background:var(--accent)"></i>Card</span><span><i style="background:var(--warn)"></i>USDT / USDC</span><span>USD equivalent</span></div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend"><span><i style="background:var(--accent)"></i>Cash App Pay</span><span>USD</span></div>`;
 }
 function balanceCards(bal) {
   const curs = Object.keys(bal || {}).sort((a, b) => (CRYPTO.includes(a) - CRYPTO.includes(b)) || a.localeCompare(b));

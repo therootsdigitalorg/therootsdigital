@@ -1,4 +1,4 @@
-<title>Digital Hub Payments</title>
+<title>Digital Wallet · Cash App Pay</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -65,9 +65,6 @@ p{margin:0}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.04em;white-space:nowrap}
 .brand-mark{width:6px;height:28px;border-radius:2px;background:var(--accent)}
 .brand small{display:block;font-size:.66rem;font-weight:600;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
-.roles{display:flex;background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
-.roles button{border:0;background:none;padding:6px 12px;border-radius:999px;cursor:pointer;color:var(--muted);font-weight:600;font-size:.85rem;white-space:nowrap}
-.roles button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
 .topbar .spacer{flex:1}
 .sandbox-pill{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--warn);background:var(--warn-soft);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);padding:4px 10px;border-radius:999px;white-space:nowrap}
 .clock{font-size:.8rem;color:var(--muted)}
@@ -238,8 +235,6 @@ pre.code{background:var(--bg);border:1px solid var(--line);border-radius:8px;pad
 }
 @media (max-width:620px){
   .g2,.g3,.g4,.form-grid{grid-template-columns:minmax(0,1fr)}
-  .roles{order:5;width:100%;justify-content:space-between}
-  .roles button{flex:1;padding:6px 6px}
   .sandbox-pill{display:none}
   h1{font-size:1.25rem}
   .kv{grid-template-columns:minmax(0,1fr)}
@@ -248,19 +243,52 @@ pre.code{background:var(--bg);border:1px solid var(--line);border-radius:8px;pad
   .onb li>:last-child{grid-column:2}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* Cash App Pay wallet dashboard */
+.wallet-hero{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:22px;align-items:center;
+  padding:26px 28px;border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line));border-radius:var(--r-lg);
+  background:linear-gradient(120deg,var(--surface) 0%,var(--accent-soft) 100%);overflow:hidden}
+.wallet-hero::after{content:"";position:absolute;width:220px;height:220px;right:60px;top:-150px;border-radius:50%;
+  background:var(--accent-soft);pointer-events:none}
+.wallet-hero-copy,.wallet-hero-mark{position:relative;z-index:1}
+.wallet-hero-copy{display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+.wallet-hero h1{font-size:clamp(1.6rem,3vw,2.1rem);letter-spacing:-.035em}
+.wallet-hero .hero-sub{max-width:620px;color:var(--muted)}
+.wallet-hero .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.wallet-hero-mark{width:78px;height:78px;display:grid;place-items:center;border-radius:24px;
+  background:var(--accent);color:var(--accent-ink);font-size:2.6rem;font-weight:800;
+  box-shadow:0 12px 30px color-mix(in srgb,var(--accent) 24%,transparent)}
+.wallet-status{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border:1px solid var(--line);
+  border-radius:999px;background:var(--surface);color:var(--muted);font-size:.76rem;font-weight:700}
+.wallet-status::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--warn)}
+.wallet-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+.wallet-metrics .card{padding:16px 18px}
+.wallet-metrics .value{font-size:1.55rem}
+.wallet-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.wallet-section-title a{font-size:.82rem;font-weight:700;text-decoration:none}
+.wallet-lower{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(260px,.85fr);gap:14px;align-items:start}
+.wallet-connect-card{display:flex;flex-direction:column;gap:14px}
+.wallet-connect-head{display:flex;align-items:center;gap:12px}
+.wallet-connect-mark{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:var(--accent);color:var(--accent-ink);font-weight:800;font-size:1.25rem}
+.wallet-connect-state{margin-left:auto}
+.wallet-connect-card .note{margin:0}
+.wallet-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.wallet-shortcut{display:flex;min-height:76px;flex-direction:column;justify-content:center;gap:4px;
+  padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);text-decoration:none}
+.wallet-shortcut:hover{border-color:var(--accent);background:var(--accent-soft)}
+.wallet-shortcut strong{font-size:.85rem}
+.wallet-shortcut span{font-size:.75rem;color:var(--muted)}
+.wallet-disclaimer{font-size:.76rem;color:var(--muted)}
+@media(max-width:900px){.wallet-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.wallet-lower{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:560px){.wallet-hero{grid-template-columns:minmax(0,1fr);padding:20px}.wallet-hero-mark{display:none}.wallet-metrics{grid-template-columns:1fr 1fr}.wallet-metrics .card{padding:13px}.wallet-metrics .value{font-size:1.3rem}.wallet-shortcuts{grid-template-columns:1fr}}
 </style>
 
 <header class="topbar">
   <button class="btn sm menu-btn" id="menuBtn" aria-label="Open navigation">☰</button>
-  <div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>
-  <div class="roles" role="group" aria-label="Switch workspace">
-    <button id="role-merchant" data-role="merchant">Merchant</button>
-    <button id="role-checkout" data-role="checkout">Checkout</button>
-    <button id="role-admin" data-role="admin">Super admin</button>
-  </div>
+  <div class="brand"><span class="brand-mark"></span><div>DIGITAL WALLET<small>Cash App Pay</small></div></div>
   <span class="spacer"></span>
   <span class="clock num" id="clock"></span>
-  <span class="sandbox-pill" title="Every payment, provider and balance on this page is simulated. Real processing is pending backend integration and provider approval.">Sandbox · simulated</span>
+  <span class="sandbox-pill" title="Local simulation only. No Cash App API calls or money movement.">Sandbox · simulated</span>
   <button class="btn sm ghost" id="themeBtn" aria-label="Toggle light or dark theme">Theme</button>
 </header>
 <div class="shell">
@@ -1399,8 +1427,25 @@ const NAV = {
     ['Governance', [['a-security','Access & security'],['a-audit','Audit log'],['a-platform','Platform settings']]],
   ],
 };
+NAV.merchant = [
+  ['Wallet', [['overview','Wallet dashboard'],['payments','Payment history'],['settlement','Settlement tracking']]],
+  ['Payments', [['checkout','Sandbox checkout']]],
+  ['Settings', [['settings','Cash App Pay']]],
+];
+NAV.checkout = [['Customer checkout', [['checkout','Cash App Pay checkout']]]];
+NAV.admin = [
+  ['Super admin', [['a-overview','Wallet overview'],['a-merchants','Merchant wallets'],['a-monitor','Transactions'],['a-ledger','Settlement reports'],['a-audit','Audit trail']]],
+];
+NAV.wallet = [
+  ['Wallet', [['overview','Wallet dashboard'],['payments','Payment history'],['balances','Balances & payouts'],['settlement','Settlement tracking']]],
+  ['Checkout', [['checkout','Cash App Pay checkout'],['links','Payment links']]],
+  ['Cash App Pay', [['settings','Connection settings'],['onboarding','Partner onboarding'],['developers','Developer tools'],['a-providers','Connection status'],['a-webhooks','Webhook activity']]],
+  ['Transactions & reports', [['customers','Customers'],['disputes','Refunds & disputes'],['reports','Reports'],['a-monitor','Transaction monitor'],['a-crypto','Payment exceptions'],['a-ledger','Ledger & settlement reports']]],
+  ['Controls', [['a-merchants','Wallets & limits'],['a-approvals','Approvals'],['a-finance','Financial controls'],['a-risk','Risk alerts'],['a-platform','Platform settings']]],
+  ['Account & audit', [['a-security','Access & security'],['a-audit','Audit trail']]],
+];
 const ROLE_DEFAULT = { merchant:'overview', checkout:'checkout', admin:'a-overview' };
-function routeRole(route){ for(const [role, groups] of Object.entries(NAV)) for(const [,items] of groups) if(items.some(([r]) => r===route)) return role; return null; }
+function routeRole(route){ return NAV.wallet.some(([,items]) => items.some(([r]) => r===route)) ? (route.startsWith('a-')?'admin':'merchant') : null; }
 function counts(){
   return {
     'a-approvals': S.payouts.filter(p => ['pending_approval','held'].includes(p.status)).length + S.wallets.filter(w=>w.status==='pending_review').length + S.banks.filter(b=>b.status==='pending_review').length + S.merchants.filter(m=>m.kyb==='pending').length
@@ -1413,27 +1458,16 @@ function counts(){
 function renderRail(){
   const c = counts();
   let h = '';
-  if(UI.role==='merchant'){
-    h += `<div class="ctx"><label for="merchantSel">Merchant account</label><select id="merchantSel">${S.merchants.map(m => `<option value="${m.id}" ${m.id===UI.merchantId?'selected':''}>${esc(m.name)}</option>`).join('')}</select></div>`;
-  }
-  if(UI.role==='admin'){
-    const u = currentAdmin();
-    h += `<div class="ctx"><label for="adminSel">Acting as (RBAC)</label><select id="adminSel">${S.staff.map(s => `<option value="${s.id}" ${s.id===u.id?'selected':''}>${esc(s.name)} · ${esc(ADMIN_ROLES[s.role].label)}</option>`).join('')}</select>
-      <div class="row" style="margin-top:6px;gap:6px">${badge(u.mfa?'enabled':'mfa_off', u.mfa?'MFA on':'MFA off')}${u.status!=='active'?badge('suspended','disabled'):''}</div></div>`;
-  }
-  for(const [group, items] of NAV[UI.role]){
+  for(const [group, items] of NAV.wallet){
     h += `<div class="navgroup">${esc(group)}</div><div class="nav">`;
     for(const [r, label] of items) h += `<a href="#${r}" data-route="${r}" ${UI.route===r?'aria-current="page"':''}>${esc(label)}${c[r]?`<span class="count">${c[r]}</span>`:''}</a>`;
     h += `</div>`;
   }
-  if(UI.role==='checkout'){
-    h += `<div class="navgroup">Open a payment link</div><div class="nav">${S.links.filter(l=>l.status==='active').map(l => `<a href="#checkout" data-act="openLink" data-id="${l.id}">${esc(trunc(l.description,24))}<span class="faint num" style="font-size:.75rem">${fmt(l.amount,l.currency)}</span></a>`).join('')}</div>`;
-  }
+  h += `<div class="navgroup">Open a payment link</div><div class="nav">${S.links.filter(l=>l.status==='active').map(l => `<a href="#checkout" data-act="openLink" data-id="${l.id}">${esc(trunc(l.description,24))}<span class="faint num" style="font-size:.75rem">${fmt(l.amount,l.currency)}</span></a>`).join('')}</div>`;
   $('#rail').innerHTML = h;
 }
 function render(){
-  $$('.roles button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.role===UI.role)));
-  $('#clock').textContent = 'Sim clock · ' + fmtDT(now()) + (S.clockOffsetDays ? ` (+${S.clockOffsetDays}d)` : '');
+  $('#clock').textContent = 'Sandbox · ' + fmtDT(now()) + (S.clockOffsetDays ? ` (+${S.clockOffsetDays}d)` : '');
   renderRail();
   const fn = VIEWS[UI.route] || VIEWS[ROLE_DEFAULT[UI.role]];
   try{ $('#main').innerHTML = `<div class="page">${fn()}</div>`; VIEW_MOUNT[UI.route]?.(); }
@@ -1457,7 +1491,8 @@ const mPays = () => S.payments.filter(p => p.mid===UI.merchantId);
 const SUCCESS = PAID;
 
 function head(eyebrow, title, sub='', actions=''){
-  return `<div class="page-head"><div class="stack" style="gap:4px"><span class="eyebrow">${esc(eyebrow)}</span><h1>${esc(title)}</h1>${sub?`<p class="muted">${sub}</p>`:''}</div>${actions?`<div class="actions">${actions}</div>`:''}</div>`;
+  const label = ['Super admin','Merchant console'].includes(eyebrow) ? 'Digital Wallet' : eyebrow==='Merchant' ? 'Wallet' : eyebrow;
+  return `<div class="page-head"><div class="stack" style="gap:4px"><span class="eyebrow">${esc(label)}</span><h1>${esc(title)}</h1>${sub?`<p class="muted">${sub}</p>`:''}</div>${actions?`<div class="actions">${actions}</div>`:''}</div>`;
 }
 function kybBanner(m){
   let h = '';
@@ -3119,6 +3154,288 @@ const FORMS = {
   mfa(f, fd){ if(!/^\d{6}$/.test(fd.get('code'))) throw new Error('Enter the 6-digit code.'); M().security.mfa = true; audit(ACTOR(),'security.mfa_enabled',UI.merchantId); closeModal(); toast('Two-factor authentication enabled'); },
 };
 
+/* Cash App Pay rollout: this standalone screen is deliberately simulation-only.
+   Never persist credentials or imply that a local action called Cash App. */
+function cashAppStore(){
+  S.cashApp ||= { merchants:{}, transactions:[], logs:[] };
+  S.cashApp.merchants ||= {};
+  S.cashApp.transactions ||= [];
+  S.cashApp.logs ||= [];
+  return S.cashApp;
+}
+function cashAppSettings(mid=UI.merchantId){
+  const all = cashAppStore();
+  return all.merchants[mid] ||= { clientId:'', mode:'sandbox', registration:'not_started', enabled:true, webhookUrl:'', webhookStatus:'not_configured' };
+}
+function cashAppLog(event, result, detail, mid=UI.merchantId){
+  const entry = { id:id('cal'), merchantId:mid, event, result, detail, at:now() };
+  cashAppStore().logs.unshift(entry);
+  cashAppStore().logs.length = Math.min(cashAppStore().logs.length, 100);
+  return entry;
+}
+function cashAppTransactions(mid=UI.merchantId){
+  return cashAppStore().transactions.filter(t => !mid || t.merchantId===mid);
+}
+function cashAppTransaction(txid){
+  return cashAppStore().transactions.find(t => t.id===txid);
+}
+function cashAppPaymentTable(rows, admin=false){
+  return table([
+    { h:'Date', v:t=>`<span class="num">${fmtDT(t.createdAt)}</span>` },
+    admin && { h:'Wallet account', v:t=>esc(merchant(t.merchantId)?.name||'Unknown account') },
+    { h:'Payment', v:t=>`<span class="mono">${esc(short(t.id,8,4))}</span>` },
+    { h:'Customer', v:t=>esc(t.customer||'Sandbox customer') },
+    { h:'Amount', r:1, v:t=>fmt(t.amount,'USD') },
+    { h:'Fee', r:1, v:()=>'<span class="muted">Not reported</span>' },
+    { h:'Status', v:t=>badge(t.status) },
+    { h:'Actions', v:t=>`<div class="row" style="gap:5px;flex-wrap:nowrap">
+      ${t.status==='captured'&&!t.refunded?`<button class="btn sm" data-act="cashAppRefund" data-id="${t.id}">Simulate refund</button>`:''}
+      ${t.status==='captured'?`<button class="btn sm ghost" data-act="cashAppDispute" data-id="${t.id}">Simulate dispute</button>`:''}
+      </div>` },
+  ].filter(Boolean), rows, { empty:'No Cash App Pay sandbox transactions yet. Create one from Sandbox checkout.' });
+}
+function cashAppKpi(label, value, note){
+  return `<div class="card kpi"><div class="label">${esc(label)}</div><div class="value">${value}</div><div class="sub">${esc(note)}</div></div>`;
+}
+function cashAppTransactionCard(t){
+  if(!t) return `<div class="card empty">Create a sandbox checkout to begin. No real Cash App request or payment is created.</div>`;
+  const controls = t.status==='requires_authorization'
+    ? `<div class="row"><button class="btn primary" data-act="cashAppAuthorize" data-id="${t.id}">Simulate customer approval</button><button class="btn danger" data-act="cashAppDecline" data-id="${t.id}">Simulate decline</button></div>`
+    : t.status==='authorized'
+      ? `<button class="btn primary" data-act="cashAppCapture" data-id="${t.id}">Simulate capture</button>`
+      : '';
+  const outcome = t.status==='captured'
+    ? `<div class="result"><div class="icon" style="background:var(--ok-soft);color:var(--ok)">✓</div><h2>Thank you</h2><p class="muted">Sandbox payment captured for tracking. No funds moved.</p></div>`
+    : t.status==='declined'
+      ? `<div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">×</div><h2>Payment failed</h2><p class="muted">Simulated decline. No request reached Cash App.</p></div>`
+      : t.status==='refunded'
+        ? `<div class="result"><div class="icon" style="background:var(--info-soft);color:var(--info)">↩</div><h2>Sandbox refund recorded</h2><p class="muted">No refund request was sent to Cash App.</p></div>`
+        : t.status==='disputed'
+          ? `<div class="result"><div class="icon" style="background:var(--warn-soft);color:var(--warn)">!</div><h2>Sandbox dispute recorded</h2><p class="muted">No Cash App dispute was opened.</p></div>`
+      : `<div class="stack"><div class="note info"><b>Sandbox authorization</b><span>Approval and decline buttons only change this local demo record. The real Customer Request API flow, Cash App redirect and desktop QR require approved partner credentials; no QR is fabricated here.</span></div>${controls}</div>`;
+  return `<div class="card stack"><div class="card-head" style="margin:0"><div><span class="eyebrow">Simulation · ${esc(t.status)}</span><h2>${esc(t.description)}</h2></div><b class="num">${fmt(t.amount,'USD')}</b></div>
+    ${outcome}<div class="faint">Payment ID <span class="mono">${esc(t.id)}</span> · ${esc(t.customer)} · ${fmtDT(t.createdAt)}</div>
+    <div class="note warn"><b>Digital Hub does not custody funds.</b><span>This local simulation does not authorize or transfer money.</span></div></div>`;
+}
+
+VIEWS.overview = () => {
+  const m=M(), rows=cashAppTransactions(m.id), captured=rows.filter(t=>['captured','refunded','disputed'].includes(t.status));
+  const gross=captured.reduce((sum,t)=>sum+t.amount,0), refunded=rows.reduce((sum,t)=>sum+(t.refunded||0),0);
+  const pending=rows.filter(t=>['requires_authorization','authorized'].includes(t.status)).reduce((sum,t)=>sum+t.amount,0);
+  const available=Math.max(0,gross-refunded-rows.filter(t=>t.status==='disputed').reduce((sum,t)=>sum+t.amount,0));
+  const disputes=rows.filter(t=>t.status==='disputed').length;
+  const recent=[...rows].sort((a,b)=>b.createdAt-a.createdAt).slice(0,6), cfg=cashAppSettings(m.id);
+  return `<section class="wallet-hero">
+      <div class="wallet-hero-copy"><span class="wallet-status">Sandbox · simulated</span>
+        <h1>Digital Wallet</h1>
+        <p class="hero-sub">Your Cash App Pay workspace. Track test transactions, review connection status and manage your checkout settings.</p>
+        <div class="actions"><a class="btn primary" href="#checkout" data-route="checkout">Create test payment</a><a class="btn" href="#payments" data-route="payments">View payment history</a></div>
+      </div><div class="wallet-hero-mark" aria-hidden="true">$</div>
+    </section>
+    <div class="grid wallet-metrics">
+      ${cashAppKpi('Pending · test',fmt(pending,'USD'),'Awaiting simulated authorization')}
+      ${cashAppKpi('Available · test',fmt(available,'USD'),'Local estimate · not withdrawable')}
+      ${cashAppKpi('Fees', '—','Unavailable until partner data is connected')}
+      ${cashAppKpi('Refunds · test',fmt(refunded,'USD'),`${rows.filter(t=>t.refunded>0).length} simulated refund(s)`)}
+    </div>
+    <div class="wallet-lower">
+      <section class="card">
+        <div class="wallet-section-title"><div><span class="eyebrow">Activity</span><h2>Recent payments</h2></div><a href="#payments" data-route="payments">View history →</a></div>
+        ${cashAppPaymentTable(recent)}
+        ${disputes?`<div class="note warn" style="margin-top:12px"><b>${disputes} simulated dispute(s)</b><span>These are local demo markers only; no Cash App dispute was opened.</span></div>`:''}
+      </section>
+      <aside class="card wallet-connect-card">
+        <div class="wallet-connect-head"><span class="wallet-connect-mark" aria-hidden="true">$</span><div><h2>Cash App Pay</h2><span class="faint">Partner connection</span></div>${badge('not_connected','not connected')}</div>
+        <p class="muted">This wallet is in local simulation mode. No Cash App API credentials or merchant registration are connected.</p>
+        <a class="btn" href="#settings" data-route="settings">Configure connection →</a>
+        <div class="divider"></div>
+        <div><div class="wallet-section-title"><h3>Quick access</h3></div>
+          <div class="wallet-shortcuts">
+            <a class="wallet-shortcut" href="#settlement" data-route="settlement"><strong>Settlement tracking</strong><span>Reports & reconciliation</span></a>
+            <a class="wallet-shortcut" href="#a-webhooks" data-route="a-webhooks"><strong>Webhook activity</strong><span>Local delivery diagnostics</span></a>
+            <a class="wallet-shortcut" href="#reports" data-route="reports"><strong>Wallet reports</strong><span>Review activity summaries</span></a>
+            <a class="wallet-shortcut" href="#a-audit" data-route="a-audit"><strong>Activity log</strong><span>Recent wallet events</span></a>
+          </div>
+        </div>
+      </aside>
+    </div>
+    <p class="wallet-disclaimer">Sandbox values are local simulations, not Cash App balances, fees, settlements or available funds. Digital Hub does not custody funds.</p>`;
+};
+VIEWS.payments = () => {
+  const rows=cashAppTransactions().sort((a,b)=>b.createdAt-a.createdAt);
+  return head('Wallet','Payment history','Cash App Pay sandbox attempts and their simulated status transitions.')
+    + `<div class="note info"><b>Test data</b><span>These records are stored in this browser’s existing Digital Hub demo store. They are not Cash App records.</span></div>`
+    + cashAppPaymentTable(rows);
+};
+VIEWS.settlement = () => head('Wallet','Settlement tracking','Reconciliation is unavailable without an approved Cash App partner connection and settlement report.')
+  + `<div class="grid g2"><div class="card"><div class="card-head"><h2>Connection</h2>${badge('not_connected','not connected')}</div><p class="muted">This sandbox does not request, create or pay out settlements.</p></div>
+    <div class="card"><h2>Reconciliation</h2><p class="muted" style="margin-top:8px">No external settlement rows have been imported. Simulated transaction totals are not settlement evidence.</p></div></div>
+    <div class="card"><h2>Official Cash App Pay documentation</h2><p style="margin-top:8px"><a href="https://developers.cash.app/cash-app-pay-partner-api/guides" target="_blank" rel="noreferrer">Cash App Pay Partner API guides</a></p></div>`;
+VIEWS.checkout = () => {
+  const rows=UI.cashAppCheckoutId ? cashAppTransaction(UI.cashAppCheckoutId) : null;
+  const merchants=S.merchants.filter(m=>m.status!=='suspended'&&m.status!=='rejected');
+  return head('Cash App Pay','Sandbox checkout','Run local success, decline, capture and refund scenarios. This does not open Cash App.')
+    + `<div class="grid g2"><form class="card stack" data-form="cashAppCheckout">
+      <div class="card-head" style="margin:0"><h2>Create a test checkout</h2><span class="sandbox-pill">Simulation</span></div>
+      <label class="field"><span>Merchant</span><select name="merchant">${merchants.map(m=>`<option value="${m.id}" ${m.id===UI.merchantId?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>
+      <label class="field"><span>Amount (USD)</span><input name="amount" type="number" min="0.50" max="10000" step="0.01" value="25.00" required></label>
+      <label class="field"><span>Customer label</span><input name="customer" maxlength="120" value="Sandbox customer"></label>
+      <label class="field"><span>Description</span><input name="description" maxlength="120" value="Sandbox order" required></label>
+      <button class="btn primary" type="submit">Create sandbox checkout</button>
+      <p class="faint">Only USD is supported in this local demo. No Cash App API request, QR, redirect or wallet link is created.</p>
+    </form><div class="stack"><div class="card"><h2>Test scenarios</h2><p class="muted" style="margin-top:8px">Create a checkout, then simulate approval or decline. Captured test payments can be refunded or marked disputed from Payment history.</p>
+      <p class="faint" style="margin-top:10px">Cash App Pay supports a Cash App authorization flow; a desktop QR or mobile redirect must come from the approved Cash App integration, not a locally generated code.</p></div>
+      ${cashAppTransactionCard(rows)}</div></div>`;
+};
+VIEWS.settings = () => {
+  const tab=UI.tabs.cashApp||'connection', m=M(), cfg=cashAppSettings(m.id);
+  const tabs=[['connection','Connection'],['merchant','Merchant registration'],['webhooks','Webhooks'],['logs','API logs']];
+  let body='';
+  if(tab==='connection') body=`<div class="note warn"><b>Local configuration screen</b><span>This standalone prototype makes no Cash App API calls. Live integration requires approved partner access and server-side credentials. Never enter production secrets here.</span></div>
+    <form class="card stack" data-form="cashAppSettings"><div class="card-head" style="margin:0"><h2>Cash App Pay credentials</h2>${badge('simulation','simulation only')}</div>
+      <div class="form-grid"><label class="field"><span>Client ID</span><input name="clientId" autocomplete="off" maxlength="128" value="${esc(cfg.clientId)}"><small>Demo metadata only. Issued by Cash App Pay Partner Engineering after approval.</small></label>
+      <label class="field"><span>API key</span><input name="apiKey" type="password" autocomplete="new-password" placeholder="Configure on the server; not saved in this browser"><small>Never persisted or transmitted by this page. Configure an approved key in a server-side secret manager.</small></label>
+      <label class="field"><span>Mode</span><select name="mode"><option value="sandbox" selected>Sandbox · local simulation</option><option value="live" disabled>Live · locked until partner approval</option></select></label>
+      <div class="field"><span>Connection status</span><div>${badge('simulation','local simulation only')}</div><small>No external connection has been tested.</small></div></div>
+      <div class="row"><button class="btn primary" type="submit">Save demo settings</button><button class="btn" type="button" data-act="cashAppTestConnection">Test Connection</button></div><div class="err" id="formErr"></div></form>
+      <div class="card"><h2>Supported integration surface</h2><p class="muted" style="margin-top:8px">The official partner program documents the server-side Network API, Customer Request API, Management API and partner onboarding. This prototype does not implement or claim access to those APIs.</p>
+      <p style="margin-top:8px"><a href="https://developers.cash.app/cash-app-pay-partner-api/guides" target="_blank" rel="noreferrer">Open official Cash App Pay Partner API guides</a></p></div>`;
+  if(tab==='merchant') body=`<div class="note info"><b>Registration status</b><span>Local status only; clicking request below does not register a merchant with Cash App.</span></div>
+    <div class="card stack"><div class="card-head" style="margin:0"><h2>${esc(m.name)}</h2>${badge(cfg.registration,cfg.registration.replace(/_/g,' '))}</div>
+      <p class="muted">Merchant registration requires an approved Cash App Pay partner relationship and the documented Network API.</p>
+      <button class="btn primary" data-act="cashAppRegister">Request registration · simulation</button></div>`;
+  if(tab==='webhooks') body=`<div class="note warn"><b>Webhook secrets are server-side only.</b><span>Signature verification must use the official Cash App Pay webhook signature scheme over the raw request body. This demo does not receive or verify provider webhooks.</span></div>
+    <form class="card stack" data-form="cashAppWebhook"><h2>Webhook settings</h2>
+      <label class="field"><span>HTTPS endpoint URL</span><input name="webhookUrl" type="url" placeholder="https://merchant.example/cash-app-pay/webhook" value="${esc(cfg.webhookUrl)}"><small>Saved as local demo metadata only; no endpoint is registered with Cash App.</small></label>
+      <div class="row"><button class="btn primary" type="submit">Save webhook settings</button><button class="btn" type="button" data-act="cashAppTestWebhook">Test webhook · local</button></div><div class="err" id="formErr"></div></form>`;
+  if(tab==='logs'){
+    const logs=cashAppStore().logs.filter(l=>l.merchantId===m.id);
+    body=`<div class="card"><div class="card-head"><h2>API diagnostics</h2><button class="btn sm" data-act="cashAppTestConnection">Test Connection</button></div>
+      <div class="note info"><span>External API calls: none. Logs below contain only local simulation and configuration-check events.</span></div>
+      ${table([{h:'Time',v:l=>fmtDT(l.at)},{h:'Action',v:l=>`<span class="mono">${esc(l.event)}</span>`},{h:'Result',v:l=>badge(l.result)},{h:'Details',v:l=>esc(l.detail)}],logs,{empty:'No diagnostics have been run.'})}</div>`;
+  }
+  return head('Settings','Cash App Pay','Partner credentials, merchant onboarding and webhook configuration status.')
+    + tabsBar('cashApp',tabs,'connection') + body;
+};
+VIEWS['a-overview'] = () => {
+  const rows=cashAppTransactions(null), successful=rows.filter(t=>['captured','refunded','disputed'].includes(t.status));
+  const gross=successful.reduce((sum,t)=>sum+t.amount,0);
+  return head('Super admin','Cash App Pay wallets','Global view of local simulation activity; no custodial funds or live Cash App data.')
+    + `<div class="note warn"><b>Simulation only</b><span>These totals come from browser-local test records, not wallet funds, partner API data or settlement reports.</span></div>
+    <div class="grid g4">${cashAppKpi('Wallet accounts',S.merchants.length,'Existing account records preserved')}${cashAppKpi('Sandbox payments',rows.length,'Cash App Pay demo transactions')}${cashAppKpi('Captured · simulated',fmt(gross,'USD'),'No real funds moved')}${cashAppKpi('Open disputes',rows.filter(t=>t.status==='disputed').length,'Simulated only')}</div>
+    <div class="card"><div class="card-head"><h2>Recent sandbox transactions</h2><a href="#a-monitor" data-route="a-monitor">All transactions →</a></div>${cashAppPaymentTable(rows.slice(0,8),true)}</div>`;
+};
+VIEWS['a-merchants'] = () => head('Digital Wallet','Wallet accounts & limits','Manage existing account permissions and sandbox limits; no partner registration is made.')
+  + `<div class="note warn"><b>Sandbox controls only.</b><span>These controls apply to this browser’s simulation. Live merchant provisioning and payment limits must be enforced by an authenticated server API.</span></div>`
+  + table([{h:'Wallet account',v:m=>`${esc(m.name)}<div class="faint mono">${esc(m.id)}</div>`},
+    {h:'Account status',v:m=>badge(m.kyb,m.kyb)},
+    {h:'Cash App Pay',v:m=>{const cfg=cashAppSettings(m.id);return `<form class="row" style="gap:8px;align-items:end" data-form="cashAppAdminMerchant" data-id="${m.id}">
+      <label class="check"><input type="checkbox" name="enabled" ${cfg.enabled?'checked':''}><span>Enabled</span></label>
+      <label class="field" style="max-width:150px"><span>Per-payment limit (USD)</span><input type="number" name="paymentLimitUSD" min="0.50" max="10000" step="0.01" value="${Number(cfg.paymentLimitUSD??10000).toFixed(2)}"></label>
+      <button class="btn sm" type="submit">Save</button></form>`;}},
+    {h:'Registration',v:m=>{const cfg=cashAppSettings(m.id);return badge(cfg.registration,cfg.registration.replace(/_/g,' '));}}
+  ],S.merchants,{empty:'No merchant accounts.'});
+VIEWS['a-monitor'] = () => head('Digital Wallet','Cash App Pay transactions','All wallet account sandbox transactions.')
+  + cashAppPaymentTable(cashAppTransactions(null).sort((a,b)=>b.createdAt-a.createdAt),true);
+VIEWS['a-ledger'] = () => head('Super admin','Settlement reports','No Cash App settlement or custodial ledger connection is configured.')
+  + `<div class="note warn"><b>Not connected</b><span>Do not treat sandbox transaction totals as available funds or settlement evidence.</span></div>
+    <div class="card"><h2>Reconciliation status</h2><p class="muted" style="margin-top:8px">No settlement report has been imported. Fees, reserves, payout timing and settlement references require approved partner data.</p></div>`;
+VIEWS['a-audit'] = () => {
+  const logs=cashAppStore().logs;
+  return head('Digital Wallet','Cash App Pay audit trail','Local diagnostic events only.')
+    + table([{h:'Time',v:l=>fmtDT(l.at)},{h:'Wallet account',v:l=>esc(merchant(l.merchantId)?.name||'Unknown account')},{h:'Event',v:l=>`<span class="mono">${esc(l.event)}</span>`},{h:'Result',v:l=>badge(l.result)},{h:'Detail',v:l=>esc(l.detail)}],logs,{empty:'No Cash App Pay audit events yet.'});
+};
+ACTIONS.cashAppTestConnection = () => {
+  cashAppLog('connection.test','not_connected','No network request made; configure approved partner credentials in a server-side integration.');
+  toast('No Cash App API request was made. This page is a local simulation.','warn'); rerender();
+};
+ACTIONS.cashAppRegister = () => {
+  const cfg=cashAppSettings(); cfg.registration='requested_simulation';
+  cashAppLog('merchant.registration','simulated','No registration request was sent to Cash App.');
+  audit('sandbox','cashapp.merchant_registration_simulated',UI.merchantId,'No external API call.',UI.merchantId);
+  toast('Local registration status updated; no Cash App request was sent.','warn'); rerender();
+};
+ACTIONS.cashAppTestWebhook = () => {
+  cashAppLog('webhook.test','simulated','Local diagnostic only; no webhook was sent or verified.');
+  toast('Local webhook diagnostic recorded; no external event was sent.','warn'); rerender();
+};
+ACTIONS.cashAppAuthorize = d => {
+  const t=cashAppTransaction(d.id); if(!t||t.status!=='requires_authorization') return toast('This sandbox payment is no longer awaiting authorization.','warn');
+  t.status='authorized'; t.events.push({ status:t.status, at:now() });
+  cashAppLog('payment.authorization','simulated','Local approval only; no Cash App authorization.',t.merchantId);
+  audit('sandbox','cashapp.authorization_simulated',t.id,'No external API call.',t.merchantId); toast('Sandbox authorization simulated'); rerender();
+};
+ACTIONS.cashAppDecline = d => {
+  const t=cashAppTransaction(d.id); if(!t||t.status!=='requires_authorization') return toast('This sandbox payment is no longer awaiting authorization.','warn');
+  t.status='declined'; t.events.push({ status:t.status, at:now() });
+  cashAppLog('payment.authorization','simulated_decline','Local decline only; no Cash App authorization.',t.merchantId);
+  audit('sandbox','cashapp.decline_simulated',t.id,'No external API call.',t.merchantId); toast('Sandbox decline recorded','warn'); rerender();
+};
+ACTIONS.cashAppCapture = d => {
+  const t=cashAppTransaction(d.id); if(!t||t.status!=='authorized') return toast('Only a sandbox-authorized payment can be captured.','warn');
+  t.status='captured'; t.capturedAt=now(); t.events.push({ status:t.status, at:now() });
+  cashAppLog('payment.capture','simulated','Local capture only; no Cash App capture API call.',t.merchantId);
+  audit('sandbox','cashapp.capture_simulated',t.id,'No external API call.',t.merchantId); toast('Sandbox capture recorded'); rerender();
+};
+ACTIONS.cashAppRefund = d => {
+  const t=cashAppTransaction(d.id); if(!t||t.status!=='captured'||t.refunded) return toast('This sandbox payment is not refundable.','warn');
+  if(UI.role==='admin'){ try{need('payments.manage');}catch(e){return toast(e.message,'err');} }
+  else if(UI.role==='merchant'&&!merchant(t.merchantId)?.perms.refunds) return toast('Refunds are disabled for this merchant.','warn');
+  t.refunded=t.amount; t.status='refunded'; t.events.push({ status:t.status, at:now() });
+  cashAppLog('refund.create','simulated','Full local refund only; no Cash App refund API call.',t.merchantId);
+  audit('sandbox','cashapp.refund_simulated',t.id,'No external API call.',t.merchantId); toast('Sandbox refund recorded'); rerender();
+};
+ACTIONS.cashAppDispute = d => {
+  const t=cashAppTransaction(d.id); if(!t||t.status!=='captured') return toast('Only a captured sandbox payment can be marked disputed.','warn');
+  t.status='disputed'; t.events.push({ status:t.status, at:now() });
+  cashAppLog('dispute.status','simulated','Local dispute marker only; no Cash App dispute API call.',t.merchantId);
+  audit('sandbox','cashapp.dispute_simulated',t.id,'No external API call.',t.merchantId); toast('Sandbox dispute marker recorded','warn'); rerender();
+};
+FORMS.cashAppSettings = (f,fd) => {
+  const cfg=cashAppSettings(), clientId=fd.get('clientId').trim();
+  if(clientId.length>128) throw new Error('Client ID must be 128 characters or fewer.');
+  if(fd.get('mode')!=='sandbox') throw new Error('Live mode is locked until Cash App Pay partner approval and a server integration are in place.');
+  cfg.clientId=clientId; cfg.mode='sandbox';
+  const secret=f.querySelector('[name="apiKey"]'); if(secret) secret.value='';
+  cashAppLog('settings.save','simulation','Client ID saved as demo metadata; API key discarded and never persisted.');
+  audit(ACTOR(),'cashapp.settings_saved',UI.merchantId,'Sandbox metadata only.',UI.merchantId);
+  toast('Demo settings saved. API key was not stored.');
+};
+FORMS.cashAppAdminMerchant = (f,fd) => {
+  need('merchants.controls');
+  const m=merchant(f.dataset.id); if(!m) throw new Error('Merchant not found.');
+  const limit=Number(fd.get('paymentLimitUSD'));
+  if(!Number.isFinite(limit)||limit<0.5||limit>10000) throw new Error('Sandbox per-payment limit must be between $0.50 and $10,000.00.');
+  const cfg=cashAppSettings(m.id); cfg.enabled=!!fd.querySelector('[name="enabled"]').checked; cfg.paymentLimitUSD=Math.round(limit*100)/100;
+  cashAppLog('merchant.controls','saved_simulation',`Enabled: ${cfg.enabled}; sandbox limit: $${cfg.paymentLimitUSD.toFixed(2)}.`,m.id);
+  audit(ADMIN(),'cashapp.merchant_controls_simulated',m.id,`enabled=${cfg.enabled}; limit=${cfg.paymentLimitUSD.toFixed(2)} USD`,m.id);
+  toast('Sandbox merchant controls saved.');
+};
+FORMS.cashAppWebhook = (f,fd) => {
+  const url=fd.get('webhookUrl').trim();
+  if(url){ let parsed; try{ parsed=new URL(url); }catch{ throw new Error('Enter a valid HTTPS webhook URL.'); }
+    if(parsed.protocol!=='https:'||!parsed.hostname.includes('.')) throw new Error('Webhook URL must use HTTPS and a public hostname.'); }
+  const cfg=cashAppSettings(); cfg.webhookUrl=url; cfg.webhookStatus=url?'saved_simulation':'not_configured';
+  cashAppLog('webhook.settings','saved_simulation','Local endpoint metadata only; no Cash App webhook was registered.');
+  audit(ACTOR(),'cashapp.webhook_settings_saved',UI.merchantId,'Local metadata only.',UI.merchantId);
+  toast('Local webhook settings saved; no endpoint was registered.');
+};
+FORMS.cashAppCheckout = (f,fd) => {
+  const merchantId=fd.get('merchant'), amount=parseMoney(fd.get('amount')), description=fd.get('description').trim();
+  if(!merchant(merchantId)) throw new Error('Select a valid merchant.');
+  if(!(amount>=50&&amount<=1000000)) throw new Error('Sandbox amount must be between $0.50 and $10,000.00.');
+  const cfg=cashAppSettings(merchantId);
+  if(!cfg.enabled) throw new Error('Cash App Pay is disabled for this merchant in sandbox controls.');
+  if(amount>Math.round((cfg.paymentLimitUSD??10000)*100)) throw new Error('This amount exceeds the merchant sandbox payment limit.');
+  if(!description) throw new Error('Add a description.');
+  const customer=fd.get('customer').trim().slice(0,120)||'Sandbox customer';
+  const t={ id:id('cap'), merchantId, amount, currency:'USD', description, customer, mode:'simulation', status:'requires_authorization', refunded:0, createdAt:now(), events:[{ status:'requires_authorization', at:now() }] };
+  cashAppStore().transactions.unshift(t); UI.cashAppCheckoutId=t.id;
+  cashAppLog('checkout.create','simulated','Local checkout record created; no Customer Request API call.',merchantId);
+  audit('sandbox','cashapp.checkout_simulated',t.id,'No external API call.',merchantId);
+  toast('Sandbox checkout created; no Cash App request was sent.');
+};
+
 /* ---------------- 7h. Wiring ---------------- */
 document.addEventListener('click', e => {
   const r = e.target.closest('[data-route]');
@@ -3170,7 +3487,6 @@ function applyFbag(t, keepFocus){
   (UI.filters[t.dataset.fbag] ||= {})[t.dataset.fkey] = t.value;
   clearTimeout(UI.fq); UI.fq = setTimeout(() => { const idSel = t.id; render(); if(keepFocus) refocus(idSel); }, keepFocus?250:0);
 }
-$$('.roles button').forEach(b => b.addEventListener('click', () => { closeDrawer(); stopTimers(); go(ROLE_DEFAULT[b.dataset.role]); }));
 $('#menuBtn').addEventListener('click', () => $('#rail').classList.toggle('open'));
 $('#themeBtn').addEventListener('click', () => {
   const root = document.documentElement, cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
@@ -3184,6 +3500,8 @@ $('#themeBtn').addEventListener('click', () => {
   if(!S) seed();
   if(S.platform?.approvalThresholdUSD!=null) CONFIG.approvalThresholdUSD = S.platform.approvalThresholdUSD;
   UI.merchantId = 'm_northwind';
+  cashAppStore();
+  cashAppSettings(UI.merchantId);
   const h = (location.hash||'').slice(1);
   const r = routeRole(h) ? h : 'overview';
   UI.role = routeRole(r); UI.route = r;

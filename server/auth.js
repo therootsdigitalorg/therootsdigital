@@ -10,7 +10,7 @@ const { HttpError, bad } = U;
 const SESSION_MS = 12 * 3600000;
 const STAFF_PERMS = {
   'merchants.manage': 'Approve, reject, suspend merchants; KYB / KYC / AML', 'merchants.controls': 'Permissions, limits, risk controls', 'merchants.pricing': 'Fees and reserves',
-  'merchants.live': 'Activate live mode', 'providers.authorize': 'Provider authorizations and non-3DS', 'destinations.review': 'Approve wallets and bank accounts',
+  'merchants.live': 'Activate live mode', 'providers.authorize': 'Cash App Pay registration and provider settings', 'destinations.review': 'Approve wallets and bank accounts',
   'payouts.approve': 'Approve or reject payouts', 'payouts.execute': 'Record executed payouts / refunds', 'finance.adjust': 'Ledger adjustments (maker-checker)',
   'payments.manage': 'Disputes and payment exceptions', 'alerts.manage': 'Risk alerts and rules', 'platform.settings': 'Platform settings and jobs', 'staff.manage': 'Staff, roles and access',
 };
@@ -94,7 +94,7 @@ function routes(r) {
     t.ok(); startSession(ctx, user, true);
     return { user: publicUser(user) };
   });
-  r('POST', '/auth/login', ctx => {
+  r('POST', '/auth/login', async ctx => {
     const email = String(ctx.body.email || '').trim().toLowerCase(), t = throttle('login:' + ctx.ip + ':' + email);
     const u = store.byKey('users', email);
     if (!u || u.status !== 'active' || !U.verifyPassword(String(ctx.body.password || ''), u.password_hash)) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
@@ -119,7 +119,7 @@ function routes(r) {
     if (!a) return { user: null };
     if (!a.session.mfa_ok) return { user: null, mfa_pending: true };
     const out = { user: publicUser(a.user), config: { livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
-    if (a.user.kind === 'merchant') out.merchant = store.get('merchants', a.user.merchant_id);
+    if (a.user.kind === 'merchant') out.merchant = core.normalizeMerchant(store.get('merchants', a.user.merchant_id));
     if (a.user.kind === 'staff') { out.role = STAFF_ROLES[a.user.role]; out.perms = Object.keys(STAFF_PERMS).filter(p => staffCan(a.user, p)); }
     else out.perms = MERCHANT_ROLES[a.user.role].perms;
     return out;

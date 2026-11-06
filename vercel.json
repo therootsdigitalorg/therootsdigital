@@ -10,7 +10,7 @@
     { "source": "/app", "destination": "/app.html" },
     { "source": "/admin", "destination": "/app.html" },
     { "source": "/pay/:id", "destination": "/checkout.html" },
-    { "source": "/(v1|auth|m-api|a-api|c-api|hooks|downloads|l)/:path*", "destination": "/api/index" },
+    { "source": "/(v1|auth|m-api|a-api|c-api|hooks|downloads|l|cashapp-sim)/:path*", "destination": "/api/index" },
     { "source": "/api/cron", "destination": "/api/index" }
   ],
   "crons": [{ "path": "/api/cron", "schedule": "0 3 * * *" }],
@@ -18,7 +18,7 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" },
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" },
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
         { "key": "X-Frame-Options", "value": "DENY" },
