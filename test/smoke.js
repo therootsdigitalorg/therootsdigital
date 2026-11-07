@@ -304,6 +304,26 @@ function client(extra = {}) {
     const before = core.accountId(); store.setMeta('account_id', null);
     try { const m2 = ensureAccount(); assert.equal(m2.id, before, 'the merchant with the most payments is kept'); } finally { store.setMeta('account_id', before); }
   });
+  await step('Settings: owner saves Cash App credentials in the portal; secrets encrypted, never returned; others cannot', async () => {
+    const owner = client(); await owner('POST', '/auth/login', { email: OWNER, password: merchantPw });
+    const r = await owner('POST', '/m-api/cashapp/credentials', { client_id: 'CAS-CI_PORTAL', api_key_id: 'KEY_PORTAL', api_key_secret: 'SECRET_PORTAL_123', webhook_secret: 'CASH_WH_PORTAL_456' });
+    assert.equal(r.status, 200, JSON.stringify(r.body)); assert.equal(r.body.configured, true); assert.equal(r.body.client_id, 'CAS-CI_PORTAL'); assert.equal(r.body.source.api_key_secret, 'portal');
+    assert.ok(!JSON.stringify(r.body).includes('SECRET_PORTAL_123') && !JSON.stringify((await owner('GET', '/m-api/cashapp')).body).includes('CASH_WH_PORTAL_456'), 'secrets never returned');
+    assert.ok(!JSON.stringify(store.getMeta('cashapp_credentials')).includes('SECRET_PORTAL_123'), 'secrets encrypted at rest');
+    assert.equal(CA.creds('test').keySecret, 'SECRET_PORTAL_123'); assert.equal(CA.simulated('test'), false);
+    // blank fields keep saved values
+    await owner('POST', '/m-api/cashapp/credentials', { client_id: 'CAS-CI_PORTAL2', api_key_secret: '' }); assert.equal(CA.creds('test').keySecret, 'SECRET_PORTAL_123'); assert.equal(CA.creds('test').clientId, 'CAS-CI_PORTAL2');
+    assert.equal((await owner('POST', '/m-api/cashapp/credentials', { client_id: 'has space' })).status, 400);
+    const x = client(); const inv = await owner('POST', '/m-api/team', { name: 'Ada Admin', email: 'ada@store.test', role: 'admin' });
+    await x('POST', '/auth/login', { email: 'ada@store.test', password: inv.body.temporary_password });
+    assert.equal((await x('POST', '/m-api/cashapp/credentials', { client_id: 'X' })).status, 403, 'only the owner');
+    assert.equal((await owner('POST', '/m-api/cashapp/credentials', { clear: true })).status, 200); assert.equal(CA.simulated('test'), true);
+  });
+  await step('Portal page boots (App.boot is called after the page scripts load)', async () => {
+    const html = await fetch(BASE + '/app').then(r => r.text()), scripts = [...html.matchAll(/<script src="\/([^"]+)"/g)].map(m => m[1]);
+    for (const sc of scripts) assert.equal((await fetch(BASE + '/' + sc)).status, 200, sc);
+    assert.match(fs.readFileSync(path.join(__dirname, '../public', scripts.at(-1)), 'utf8'), /\nApp\.boot\(\);\s*$/);
+  });
   await step('Downloads: WooCommerce plugin zip is the Cash App Pay gateway', async () => {
     const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50);
     const php = fs.readFileSync(path.join(__dirname, '../plugins/woocommerce/digitalhub-payments/digitalhub-payments.php'), 'utf8');

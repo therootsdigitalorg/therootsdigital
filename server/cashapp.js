@@ -19,7 +19,46 @@ class CashAppError extends Error {
   constructor(status, code, message, category, retryable = false) { super(message); this.status = status; this.code = code; this.category = category; this.retryable = retryable; }
 }
 
-const creds = mode => (mode === 'live' ? config.cashapp.live : config.cashapp.sandbox);
+/* ---------- credentials ----------
+   Entered by the owner in Settings → Cash App Pay (stored server-side; the two secrets are encrypted
+   with APP_ENCRYPTION_KEY and never sent back to the browser) or set as server environment
+   variables. A value saved in the portal takes precedence over the env var, field by field. */
+const CRED_FIELDS = { clientId: 'Client ID', keyId: 'API key ID', keySecret: 'API key secret', webhookSecret: 'Webhook signing secret' };
+const SECRET_FIELDS = ['keySecret', 'webhookSecret'];
+let credCache = { at: 0, v: {} };
+function savedCreds() {
+  if (Date.now() - credCache.at > 5000) { let v = {}; try { v = store.getMeta('cashapp_credentials', {}) || {}; } catch { v = {}; } credCache = { at: Date.now(), v }; }
+  return credCache.v;
+}
+const openSecret = v => { try { return v ? U.unseal(v) : ''; } catch { return ''; } };
+function creds(mode) {
+  const env = mode === 'live' ? config.cashapp.live : config.cashapp.sandbox, s = savedCreds()[mode] || {}, out = { base: env.base, source: {} };
+  for (const k of Object.keys(CRED_FIELDS)) {
+    const mine = SECRET_FIELDS.includes(k) ? openSecret(s[k]) : s[k];
+    out[k] = mine || env[k] || ''; out.source[k] = mine ? 'portal' : env[k] ? 'server env' : null;
+  }
+  out.updated_at = s.updated_at || null;
+  return out;
+}
+/** Saves credentials typed into Settings → Cash App Pay. Blank fields keep the saved value; clear removes this mode's saved values. */
+function saveCredentials(mode, input = {}) {
+  const all = { ...(store.getMeta('cashapp_credentials', {}) || {}) };
+  if (input.clear) delete all[mode];
+  else {
+    const next = { ...(all[mode] || {}) };
+    for (const [k, label] of Object.entries(CRED_FIELDS)) {
+      const v = String(input[k] ?? '').trim();
+      if (!v) continue;
+      if (v.length > 300 || /\s/.test(v)) throw new U.HttpError(400, 'invalid_request', `${label} looks wrong: paste it exactly, without spaces.`);
+      next[k] = SECRET_FIELDS.includes(k) ? U.seal(v) : v;
+    }
+    next.updated_at = Date.now();
+    all[mode] = next;
+  }
+  store.setMeta('cashapp_credentials', all);
+  credCache.at = 0;
+  return creds(mode);
+}
 /** Real Cash App credentials present for this mode (Network API needs client ID + API key ID; live also needs the signing secret). */
 const configured = mode => { const c = creds(mode); return !!(c.clientId && c.keyId && (mode === 'test' || c.keySecret)); };
 const simulated = mode => mode === 'test' && !configured('test');
@@ -206,4 +245,4 @@ const sim = {
 };
 const client = mode => (simulated(mode) ? sim : real(mode));
 
-module.exports = { CashAppError, client, configured, simulated, environmentLabel, verifyWebhook, signature, canonical, sim, setSimEventSink: fn => { simEventSink = fn; }, PAYMENT_DECLINES, REFUND_DECLINES };
+module.exports = { CashAppError, client, creds, saveCredentials, CRED_FIELDS, configured, simulated, environmentLabel, verifyWebhook, signature, canonical, sim, setSimEventSink: fn => { simEventSink = fn; }, PAYMENT_DECLINES, REFUND_DECLINES };

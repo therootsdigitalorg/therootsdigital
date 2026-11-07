@@ -221,20 +221,35 @@ VIEWS.setup = async () => {
     + `<div class="split"><div class="card"><div class="card-head"><h2>Checklist</h2>${badge(done === d.steps.length ? 'done' : 'pending', `${done}/${d.steps.length}`)}</div><div class="progress" style="margin-bottom:12px"><div style="width:${Math.round(done / d.steps.length * 100)}%"></div></div>
       <ol class="onb">${d.steps.map((s, i) => `<li><span class="n ${s.done ? 'done' : ''}">${s.done ? '✓' : i + 1}</span><div><b>${esc(s.label)}</b><div class="muted" style="font-size:.82rem">${esc(s.detail)}</div></div>${badge(s.done ? 'done' : 'pending', s.done ? 'done' : 'to do')}</li>`).join('')}</ol></div>
       <div class="card stack"><h2>Status</h2>${kv([['Cash App sandbox', caStatus(d.cashapp.test.status)], ['Cash App production', caStatus(d.cashapp.live.status)], ['Live payments', d.live_ready ? badge('pending', 'not active') : badge('active')], ['Next step', esc(d.live_ready || 'None: you are live')]])}
-        ${note('info', 'Cash App Pay', 'Cash App Pay is for US businesses charging US dollars. Your Cash App partner credentials stay in the server settings (Vercel environment variables), never in this page.')}<a class="btn primary" href="#/settings">Open Settings → Cash App Pay</a></div></div>`;
+        ${note('info', 'Cash App Pay', 'Cash App Pay is for US businesses charging US dollars. Enter your Cash App API credentials in Settings → Cash App Pay; secrets are encrypted on the server and never shown again.')}<a class="btn primary" href="#/settings">Open Settings → Cash App Pay</a></div></div>`;
 };
 
 /* ---------------- settings (incl. Cash App Pay) ---------------- */
+/** Settings → Cash App Pay: the API credentials Cash App issued with the partner approval. Secrets are write-only. */
+function credForm(env, mode) {
+  const src = k => env.source?.[k] ? `<span class="tag">${env.source[k] === 'portal' ? 'saved here' : 'from server env'}</span>` : '';
+  const owner = App.me.user.role === 'owner', where = mode === 'test' ? 'Sandbox' : 'Production';
+  const secretPh = has => has ? '•••••••• saved (leave blank to keep)' : 'paste here';
+  return `<form class="card stack" data-form="cashappCreds"><div class="card-head" style="margin:0"><h2>Cash App Pay API credentials · ${where}</h2>${env.configured ? badge('active', 'connected') : env.simulated ? badge('pending', 'using local simulator') : badge('fail', 'not set')}</div>
+    <p class="muted">Paste the ${mode === 'test' ? 'sandbox' : 'production'} credentials from your Cash App Pay partner account (Cash App Developer portal). Switch the Test mode toggle at the top to enter the ${mode === 'test' ? 'production' : 'sandbox'} set. Secrets are encrypted on the server and never shown again.</p>
+    <div class="form-grid">
+      ${field('Client ID', input('client_id', { value: env.client_id || '', ph: 'CAS-CI_…', extra: 'autocomplete="off" spellcheck="false"' }), src('client_id'))}
+      ${field('API key ID', input('api_key_id', { value: env.api_key_id || '', ph: 'KEY_…', extra: 'autocomplete="off" spellcheck="false"' }), src('api_key_id'))}
+      ${field('API key secret', input('api_key_secret', { type: 'password', ph: secretPh(env.signing_secret), extra: 'autocomplete="new-password"' }), (src('api_key_secret') || '') + (mode === 'test' ? ' Optional in sandbox: unsigned requests are allowed there.' : ' Required for production: signs every request.'))}
+      ${field('Webhook signing secret', input('webhook_secret', { type: 'password', ph: secretPh(env.webhook_secret), extra: 'autocomplete="new-password"' }), (src('webhook_secret') || '') + ' Cash App shows it when you register the webhook below.')}
+    </div><div class="err" id="formErr"></div>
+    <div class="row"><button class="btn primary" type="submit" ${owner ? '' : 'disabled title="Only the account owner can change credentials"'}>Save credentials</button>${env.updated_at ? `<button type="button" class="btn ghost" data-act="caClearCreds" ${owner ? '' : 'disabled'}>Remove saved credentials</button><span class="faint">Saved ${fmtDT(env.updated_at)}</span>` : ''}</div></form>`;
+}
+FORM.cashappCreds = async (f, form) => { const r = await api('POST', '/m-api/cashapp/credentials', f); form.reset(); toast(r.configured ? 'Credentials saved. Use Test connection to check them.' : 'Saved. Add the remaining fields to connect.'); await render(); };
+ACT.caClearCreds = () => confirmBox('Remove saved credentials?', `The ${App.mode === 'test' ? 'sandbox' : 'production'} credentials saved here are deleted. Values set as server environment variables still apply.`, 'Remove', () => api('POST', '/m-api/cashapp/credentials', { clear: true }));
 VIEWS.settings = async () => {
   const t = tab('set', 'cashapp'), m = M(); let body = '';
   if (t === 'cashapp') {
     const d = await api('GET', '/m-api/cashapp'), a = d.details?.address || {}, mode = App.mode, env = d.environments.find(e => e.mode === mode), reg = d[mode];
     body = liveBlocked(mode === 'live' && !d.live_payments ? 'LIVE_PAYMENTS is off on the server.' : '')
-      + `<div class="grid g2"><div class="card stack"><div class="card-head" style="margin:0"><h2>${mode === 'test' ? 'Sandbox' : 'Production'} credentials</h2>${env.simulated ? badge('pending', 'local simulator') : env.configured ? badge('active', 'set') : badge('fail', 'not set')}</div>
-        ${kv([['Environment', esc(env.label)], ['API base', `<span class="mono">${esc(env.base)}</span>`], ['Client ID', env.client_id ? `<span class="mono">${esc(env.client_id)}</span>` : '—'], ['API key ID', env.api_key_id ? `<span class="mono">${esc(env.api_key_id)}</span>` : '—'],
-          ['Request signing secret', env.signing_secret ? badge('active', 'set') : badge(mode === 'test' ? 'pending' : 'fail', mode === 'test' ? 'not set (sandbox allows unsigned)' : 'missing')], ['Webhook signing secret', env.webhook_secret ? badge('active', 'set') : badge('pending', 'missing')],
-          ['Webhook URL', `<span class="mono">${esc(env.webhook_url)}</span> <button class="btn sm ghost" data-act="copy" data-text="${esc(env.webhook_url)}">Copy</button>`], ['Region', esc(d.region)]])}
-        <p class="faint">Set these in Vercel → Settings → Environment Variables, then redeploy: ${env.env_names.map(n => `<span class="tag">${n}</span>`).join(' ')}. Secrets are never shown here.</p>
+      + credForm(env, mode)
+      + `<div class="grid g2"><div class="card stack"><div class="card-head" style="margin:0"><h2>Connection · ${mode === 'test' ? 'sandbox' : 'production'}</h2>${env.simulated ? badge('pending', 'local simulator') : env.configured ? badge('active', 'ready') : badge('fail', 'credentials missing')}</div>
+        ${kv([['Environment', esc(env.label)], ['API base', `<span class="mono">${esc(env.base)}</span>`], ['Webhook URL', `<span class="mono">${esc(env.webhook_url)}</span> <button class="btn sm ghost" data-act="copy" data-text="${esc(env.webhook_url)}">Copy</button>`], ['Region', esc(d.region)]])}
         <div class="row"><button class="btn" data-act="caTest" ${can('settings') ? '' : 'disabled'}>Test connection</button><button class="btn" data-act="caWebhook" ${can('settings') && env.configured ? '' : 'disabled'}>Register webhook with Cash App</button></div></div>
       <div class="card stack"><div class="card-head" style="margin:0"><h2>Your business at Cash App · ${mode === 'test' ? 'sandbox' : 'production'}</h2>${caStatus(reg.status)}</div>
         ${kv([['Cash App brand', `<span class="mono">${esc(reg.brand_id || '—')}</span>`], ['Cash App merchant', `<span class="mono">${esc(reg.merchant_id || '—')}</span>`], ['Registered', fmtDT(reg.registered_at)], reg.error && ['Last error', `<span class="err">${esc(reg.error)}</span>`]])}
@@ -266,3 +281,5 @@ FORM.settings = async f => { await api('PATCH', '/m-api/settings', f); toast('Sa
 ACT.inviteMember = () => formModal('Add team member', 'invite', `${field('Name', input('name', { req: true }))}${field('Email', input('email', { type: 'email', req: true }))}${field('Role', select('role', [['admin', 'Admin'], ['finance', 'Finance'], ['developer', 'Developer'], ['support', 'Support'], ['viewer', 'Viewer']]))}`, 'Add member');
 FORM.invite = async f => { const r = await api('POST', '/m-api/team', f); closeModal(); await render(); secretModal('Temporary password', `Share this with <b>${esc(r.user.email)}</b> securely. They should change it and enable 2FA on first sign-in.`, r.temporary_password); };
 ACT.removeMember = d => confirmBox('Remove member?', 'They lose access immediately.', 'Remove', () => api('DELETE', '/m-api/team/' + d.id));
+
+App.boot();

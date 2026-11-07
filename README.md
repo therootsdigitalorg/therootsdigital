@@ -14,7 +14,7 @@ Requires **Node.js 22.13+** (local mode uses its built-in SQLite). Run `npm inst
 ```bash
 cp .env.example .env      # optional: defaults work locally
 npm start                 # http://localhost:3000
-npm test                  # 36 end-to-end checks on a throwaway database
+npm test                  # 38 end-to-end checks on a throwaway database
 ```
 
 On first start the server creates the database, the store account (`BUSINESS_NAME`), its owner (`ADMIN_EMAIL` /
@@ -42,10 +42,12 @@ Team roles: owner, admin, finance, developer, support and viewer. The owner adds
 
 ## Cash App Pay setup
 
-Credentials live only in server environment variables, never in the browser, the database or git.
-**Settings → Cash App Pay** shows which are set (never their values), tests the connection, registers the webhook endpoint
-with Cash App, registers your business (sandbox or production, following the Test mode switch) and shows the API log and
-received events.
+Enter the credentials from your Cash App Pay partner account in **Settings → Cash App Pay** (owner only): Client ID,
+API key ID, API key secret and webhook signing secret, separately for sandbox (Test mode on) and production (Test mode off).
+The two secrets are encrypted on the server with `APP_ENCRYPTION_KEY` and are never shown again; leave a field blank to keep
+the saved value. Alternatively set the environment variables below; a value saved in the portal takes precedence.
+The same page tests the connection, registers the webhook endpoint with Cash App, registers your business and shows the API
+log and received events.
 
 | Variable | Purpose |
 |---|---|
@@ -91,9 +93,9 @@ merchants stop working.
 
 ## Going live
 
-1. Set the production `CASHAPP_*` variables from your Cash App Pay partner approval and `LIVE_PAYMENTS=1`, then redeploy.
+1. Set `LIVE_PAYMENTS=1` in Vercel and redeploy.
 2. Sign in, enable 2FA (required for production changes), switch to live mode.
-3. Settings → Cash App Pay: save your US business details, **Register with Cash App production**, then **Register webhook
-   with Cash App**. Copy the signing secret Cash App returns into `CASHAPP_WEBHOOK_SECRET` and redeploy.
+3. Settings → Cash App Pay: paste your production credentials and save, click **Test connection**, save your US business details, **Register with Cash App production**, then **Register webhook
+   with Cash App**. Paste the signing secret Cash App returns into "Webhook signing secret" and save.
 4. Create live API keys and a live webhook endpoint for each store and put them in the WooCommerce plugin (test mode off).
 5. When Cash App deposits a settlement, record it in Wallet → Settlements.

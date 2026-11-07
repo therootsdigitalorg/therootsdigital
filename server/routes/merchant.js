@@ -33,7 +33,7 @@ function onboarding(m) {
     { key: 'webhook', label: 'Webhook endpoint for your store', done: any('webhook_endpoints', {}), detail: 'Developers & API → Webhooks. The WooCommerce plugin needs one.' },
     { key: 'test_payment', label: 'Complete a test payment', done: store.list('payments', { merchant_id: m.id, mode: 'test', status: core.PAID }, { limit: 1 }).length > 0, detail: 'Pay a payment link or a test order in sandbox.' },
     { key: 'mfa', label: 'Two-factor authentication on the owner account', done: !!owner?.mfa_enabled, detail: 'Required for live keys and production Cash App changes.' },
-    { key: 'cashapp_creds', label: 'Cash App production credentials on the server', done: CA.configured('live'), detail: 'CASHAPP_CLIENT_ID, CASHAPP_API_KEY_ID, CASHAPP_API_KEY_SECRET, CASHAPP_WEBHOOK_SECRET in Vercel.' },
+    { key: 'cashapp_creds', label: 'Cash App production API credentials', done: CA.configured('live'), detail: 'Settings → Cash App Pay (live mode): Client ID, API key ID, API key secret, webhook signing secret.' },
     { key: 'cashapp_live', label: 'Registered with Cash App Pay production', done: core.cashappReady(m, 'live'), detail: 'Settings → Cash App Pay → Register (live mode).' },
     { key: 'live', label: 'Live payments on', done: !core.liveReady(m), detail: core.liveReady(m) || 'Live Cash App payments are enabled.' },
   ];
@@ -148,7 +148,7 @@ function routes(r) {
   /* ---- setup checklist ---- */
   M('GET', '/onboarding', 'read', (ctx, c) => ({ steps: onboarding(c.m), live_ready: core.liveReady(c.m), cashapp: { test: cashappStatus(c.m, 'test'), live: cashappStatus(c.m, 'live') } }));
 
-  /* ---- Settings → Cash App Pay (credentials stay in server env and are never returned) ---- */
+  /* ---- Settings → Cash App Pay (secrets are encrypted server-side and never returned) ---- */
   M('GET', '/cashapp', 'read', (ctx, c) => ({
     details: c.m.cashapp.details, test: cashappStatus(c.m, 'test'), live: cashappStatus(c.m, 'live'), region: config.cashapp.region, live_payments: config.livePayments,
     environments: ['test', 'live'].map(environment),
@@ -159,26 +159,35 @@ function routes(r) {
     c.m.cashapp.details = core.validateDetails(ctx.body); store.put('merchants', c.m);
     core.audit(c.actor, 'cashapp.details_update', c.m.id, '', c.m.id); return { details: c.m.cashapp.details };
   });
+  /** Owner enters the Cash App Pay API credentials for the current mode (test = sandbox, live = production). */
+  M('POST', '/cashapp/credentials', 'settings', (ctx, c) => {
+    if (c.user.role !== 'owner') throw new HttpError(403, 'forbidden', 'Only the account owner can change Cash App credentials.');
+    needMfaLive(c, 'changing Cash App production credentials');
+    const b = ctx.body || {};
+    CA.saveCredentials(c.mode, b.clear ? { clear: true } : { clientId: b.client_id, keyId: b.api_key_id, keySecret: b.api_key_secret, webhookSecret: b.webhook_secret });
+    core.audit(c.actor, b.clear ? 'cashapp.credentials_cleared' : 'cashapp.credentials_saved', c.mode, Object.entries({ client_id: b.client_id, api_key_id: b.api_key_id, api_key_secret: b.api_key_secret, webhook_secret: b.webhook_secret }).filter(([, v]) => v).map(([k]) => k).join(', '), c.m.id);
+    return environment(c.mode);
+  });
   M('POST', '/cashapp/register', 'settings', async (ctx, c) => {
     needMfaLive(c, 'registering with Cash App production');
     return cashappStatus(c.m, c.mode, await core.registerCashApp(c.m, c.mode, c.actor));
   });
   M('POST', '/cashapp/test-connection', 'settings', async (ctx, c) => {
     const started = Date.now();
-    if (!CA.configured(c.mode) && !CA.simulated(c.mode)) throw bad('Cash App credentials for this environment are not set on the server.');
+    if (!CA.configured(c.mode) && !CA.simulated(c.mode)) throw bad('Enter the Cash App credentials for this environment first.');
     try { await CA.client(c.mode).listMerchants({ op: 'test_connection' }); } catch (e) { core.audit(c.actor, 'cashapp.test_connection', c.mode, 'failed: ' + e.message, c.m.id); throw bad(`Cash App connection failed: ${e.message}`, e.code); }
     core.audit(c.actor, 'cashapp.test_connection', c.mode, 'ok', c.m.id); return { ok: true, environment: CA.environmentLabel(c.mode), ms: Date.now() - started };
   });
   /** Management API: register this server's webhook URL with Cash App; Cash App issues the signing secret for the env var. */
   M('POST', '/cashapp/webhook-endpoint', 'settings', async (ctx, c) => {
     needMfaLive(c, 'changing Cash App production webhooks');
-    const cr = c.mode === 'live' ? config.cashapp.live : config.cashapp.sandbox;
-    if (!CA.configured(c.mode)) throw bad('Set the Cash App credentials for this environment on the server first.');
+    const cr = CA.creds(c.mode);
+    if (!CA.configured(c.mode)) throw bad('Enter the Cash App credentials for this environment first (Settings → Cash App Pay).');
     const url = `${config.publicUrl}/hooks/cashapp/${c.mode === 'live' ? 'production' : 'sandbox'}`;
     const types = ['customer_request.state.updated', 'payment.status.updated', 'refund.status.updated', 'dispute.created', 'dispute.state.updated', 'merchant.status.updated'];
     const ep = await CA.client(c.mode).createWebhookEndpoint({ idempotency_key: U.id('whe'), webhook_endpoint: { api_key_id: cr.keyId, url, event_configurations: types.map(event_type => ({ event_type, api_version: 'v1' })), reference_id: 'digitalhub' } }, { op: 'create_webhook_endpoint' }).catch(e => { throw bad(`Cash App: ${e.message}`, e.code); });
     core.audit(c.actor, 'cashapp.webhook_endpoint', c.mode, ep.id, c.m.id);
-    return { endpoint: ep, note: `Copy the signing secret Cash App issued for this endpoint into ${c.mode === 'live' ? 'CASHAPP_WEBHOOK_SECRET' : 'CASHAPP_SANDBOX_WEBHOOK_SECRET'} on the server, then redeploy.` };
+    return { endpoint: ep, note: 'Paste the signing secret Cash App issued for this endpoint into "Webhook signing secret" above and save.' };
   });
 
   /* ---- settings & team ---- */
@@ -205,10 +214,10 @@ function routes(r) {
   M('POST', '/test/sample-payments', 'payments', async (ctx, c) => { if (c.mode !== 'test') throw bad('Only in test mode.'); return { created: await require('../seed').samplePayments(c.m, 6) }; });
 }
 
-/** Which Cash App credentials are set on the server for one environment (never the secret values). */
+/** Which Cash App credentials are set for one environment and where they come from (never the secret values). */
 function environment(mode) {
-  const cr = mode === 'live' ? config.cashapp.live : config.cashapp.sandbox;
-  return { mode, label: CA.environmentLabel(mode), configured: CA.configured(mode), simulated: CA.simulated(mode),
+  const cr = CA.creds(mode);
+  return { mode, label: CA.environmentLabel(mode), configured: CA.configured(mode), simulated: CA.simulated(mode), source: { client_id: cr.source.clientId, api_key_id: cr.source.keyId, api_key_secret: cr.source.keySecret, webhook_secret: cr.source.webhookSecret }, updated_at: cr.updated_at,
     client_id: cr.clientId || null, api_key_id: cr.keyId || null, signing_secret: !!cr.keySecret, webhook_secret: !!cr.webhookSecret, base: cr.base || (mode === 'live' ? 'https://api.cash.app' : 'https://sandbox.api.cash.app'),
     webhook_url: `${config.publicUrl}/hooks/cashapp/${mode === 'live' ? 'production' : 'sandbox'}`,
     env_names: mode === 'live' ? ['CASHAPP_CLIENT_ID', 'CASHAPP_API_KEY_ID', 'CASHAPP_API_KEY_SECRET', 'CASHAPP_WEBHOOK_SECRET'] : ['CASHAPP_SANDBOX_CLIENT_ID', 'CASHAPP_SANDBOX_API_KEY_ID', 'CASHAPP_SANDBOX_API_KEY_SECRET', 'CASHAPP_SANDBOX_WEBHOOK_SECRET'] };
