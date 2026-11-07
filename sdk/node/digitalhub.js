@@ -19,7 +19,6 @@ class DigitalHub {
     this.refunds = { create: (b, o) => r('POST', '/refunds', b, o), list: q => r('GET', '/refunds', null, { query: q }) };
     this.paymentLinks = { create: (b, o) => r('POST', '/payment_links', b, o), list: q => r('GET', '/payment_links', null, { query: q }), deactivate: id => r('POST', `/payment_links/${id}/deactivate`, {}) };
     this.balance = { retrieve: () => r('GET', '/balance') };
-    this.payouts = { create: (b, o) => r('POST', '/payouts', b, o), list: q => r('GET', '/payouts', null, { query: q }) };
     this.events = { retrieve: id => r('GET', `/events/${id}`), list: q => r('GET', '/events', null, { query: q }) };
     this.webhookEndpoints = { create: b => r('POST', '/webhook_endpoints', b), list: () => r('GET', '/webhook_endpoints'), del: id => r('DELETE', `/webhook_endpoints/${id}`) };
   }

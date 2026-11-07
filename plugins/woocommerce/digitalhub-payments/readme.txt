@@ -27,4 +27,4 @@ Accept Cash App Pay through Digital Hub hosted checkout. US merchants, USD store
 * Works with the classic and the block-based checkout.
 
 == Requirements ==
-Store currency must be USD. Live payments need the merchant to be approved in Digital Hub and registered with Cash App production.
+Store currency must be USD. Live payments need Cash App production credentials on the Digital Hub server and your business registered with Cash App production (Digital Hub → Settings → Cash App Pay).

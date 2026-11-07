@@ -1,14 +1,13 @@
 'use strict';
-/* Digital Hub dashboard — core: helpers, API client, auth screens, shell and router.
-   Merchant views live in app-merchant.js, Super Admin views in app-admin.js. */
+/* Digital Hub Wallet portal — core: helpers, API client, sign-in, shell and router.
+   Portal pages live in app-merchant.js. One store account, US dollars only. */
 
 /* ---------------- helpers ---------------- */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const SYM = { USD: '$', EUR: '€', GBP: '£', AED: 'AED ', PKR: 'Rs ' };
-const CRYPTO = ['USDT', 'USDC'];
-function fmt(minor, cur) { const n = Number(minor) || 0; const s = (Math.abs(n) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return (n < 0 ? '−' : '') + (CRYPTO.includes(cur) ? `${s} ${cur}` : `${SYM[cur] ?? ''}${s}${SYM[cur] ? '' : ' ' + (cur || '')}`); }
+function fmt(minor) { const n = Number(minor) || 0; return (n < 0 ? '−' : '') + '$' + (Math.abs(n) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+const usd = fmt;
 const fmtDT = t => t ? new Date(t > 1e12 ? t : t * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtDate = t => t ? new Date(t > 1e12 ? t : t * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const short = (s, a = 8, b = 4) => s && s.length > a + b + 3 ? `${s.slice(0, a)}…${s.slice(-b)}` : (s || '');
@@ -16,9 +15,6 @@ const toMinor = v => { const n = Number(String(v).replace(/[, ]/g, '')); return 
 const uid = () => (window.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2));
 const lsGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
-const COUNTRIES = { US: 'United States', GB: 'United Kingdom', DE: 'Germany', FR: 'France', AE: 'United Arab Emirates', PK: 'Pakistan', CA: 'Canada', AU: 'Australia', IN: 'India', SA: 'Saudi Arabia', NG: 'Nigeria', SG: 'Singapore' };
-const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'];
-
 const TONE = {
   ok: ['partially_won', 'settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
   accent: ['captured'],
@@ -44,22 +40,15 @@ function toast(msg, kind = '') { const t = document.createElement('div'); t.clas
 function copyText(text) { (navigator.clipboard?.writeText(text) || Promise.reject()).then(() => toast('Copied to clipboard'), () => { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('Copied to clipboard'); } catch { toast('Select and copy manually', 'warn'); } ta.remove(); }); }
 function qrInto(el, text) { if (!el) return; el.innerHTML = ''; if (window.QRCode) { try { new QRCode(el, { text, width: 156, height: 156, colorDark: '#0C172A', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M }); return; } catch {} } el.innerHTML = '<span style="color:#0C172A;font-size:12px">QR unavailable</span>'; }
 function barChart(series) {
-  const W = 720, H = 210, padL = 52, padB = 26, padT = 12, padR = 8, max = Math.max(1, ...series.map(s => s.card + s.crypto));
+  const W = 720, H = 210, padL = 52, padB = 26, padT = 12, padR = 8, max = Math.max(1, ...series.map(s => s.amount));
   const raw = max / 100 / 4, p10 = Math.pow(10, Math.floor(Math.log10(raw || 1))), f = raw / p10, step = (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p10 || 1;
   const top = Math.ceil(max / 100 / step) * step, bw = (W - padL - padR) / series.length, y = v => H - padB - (v / 100) / top * (H - padB - padT);
   let g = '';
   for (let t = 0; t <= top; t += step) { const yy = y(t * 100); g += `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="var(--line)"/><text x="${padL - 6}" y="${yy + 3}" text-anchor="end">$${t >= 1000 ? (t / 1000) + 'k' : t}</text>`; }
-  series.forEach((s, i) => { const x = padL + i * bw + bw * .18, w = bw * .64, yc = y(s.card), yk = y(s.card + s.crypto);
-    g += `<rect x="${x}" y="${yc}" width="${w}" height="${H - padB - yc}" fill="var(--accent)" rx="2"><title>${s.label}: card ${fmt(s.card, 'USD')}</title></rect>`;
-    if (s.crypto) g += `<rect x="${x}" y="${yk}" width="${w}" height="${yc - yk}" fill="var(--warn)" rx="2"><title>${s.label}: crypto ${fmt(s.crypto, 'USD')}</title></rect>`;
+  series.forEach((s, i) => { const x = padL + i * bw + bw * .18, w = bw * .64, ya = y(s.amount);
+    g += `<rect x="${x}" y="${ya}" width="${w}" height="${H - padB - ya}" fill="var(--accent)" rx="2"><title>${s.label}: ${fmt(s.amount)}</title></rect>`;
     if (i % 2 === 0) g += `<text x="${x + w / 2}" y="${H - 8}" text-anchor="middle">${s.label}</text>`; });
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend"><span><i style="background:var(--accent)"></i>Cash App Pay</span><span>USD</span></div>`;
-}
-function balanceCards(bal) {
-  const curs = Object.keys(bal || {}).sort((a, b) => (CRYPTO.includes(a) - CRYPTO.includes(b)) || a.localeCompare(b));
-  if (!curs.length) return `<div class="card empty">No balances yet. Balances appear after the first successful payment.</div>`;
-  return `<div class="grid g4">${curs.map(c => { const b = bal[c]; return `<div class="card kpi"><div class="row" style="justify-content:space-between"><span class="label">${c} balance</span><span class="tag">${CRYPTO.includes(c) ? 'stablecoin' : 'fiat'}</span></div>
-    <div class="value">${fmt(b.available, c)}</div><div class="sub">available</div><div class="divider" style="margin:10px 0"></div>${kv([['Pending', fmt(b.pending, c)], ['Reserve', fmt(b.reserve, c)], ['Payout hold', fmt(b.hold, c)]])}</div>`; }).join('')}</div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily Cash App Pay volume in dollars">${g}</svg></div><div class="legend"><span><i style="background:var(--accent)"></i>Cash App Pay</span></div>`;
 }
 
 /* ---------------- API client ---------------- */
@@ -99,7 +88,6 @@ function closeDrawer() { drawerFn = null; $('#drawerHost').innerHTML = ''; }
 const App = { me: null, mode: lsGet('dh.mode') === 'live' ? 'live' : 'test', tabs: {}, filters: {}, cache: {} };
 const VIEWS = {}, MOUNT = {}, ACT = {}, FORM = {}, NAV = {};
 const can = p => App.me?.perms?.includes(p);
-const isStaff = () => App.me?.user?.kind === 'staff';
 
 /** Run an action with toast on error; refreshes page/drawer on success unless noRefresh. */
 async function run(fn, { ok, noRefresh } = {}) {
@@ -145,27 +133,20 @@ ACT.authView = d => { App.authView = d.view; render(); };
 /* ---------------- auth screens ---------------- */
 function authScreen() {
   const v = App.authView || 'login';
-  const brand = `<div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>`;
-  let body = '';
-  if (v === 'mfa') body = `<h1>Two-factor verification</h1><p class="muted">Enter the 6-digit code from your authenticator app.</p>
-    <form class="stack" data-form="mfaLogin">${field('Code', input('code', { req: true, extra: 'inputmode="numeric" autocomplete="one-time-code" maxlength="6"' }))}<div class="err" id="formErr"></div><button class="btn primary" type="submit">Verify</button></form>`;
-  else if (v === 'signup') body = `<h1>Create your merchant account</h1><p class="muted">Start in test mode instantly. Go live after business verification.</p>
-    <form class="stack" data-form="signup"><div class="form-grid">${field('Business name', input('business_name', { req: true }))}${field('Country', select('country', Object.entries(COUNTRIES), 'US'))}</div>
-    ${field('Your name', input('name', { req: true, extra: 'autocomplete="name"' }))}${field('Work email', input('email', { type: 'email', req: true, extra: 'autocomplete="email"' }))}
-    ${field('Website', input('website', { ph: 'yourshop.com' }))}${field('Password', input('password', { type: 'password', req: true, extra: 'autocomplete="new-password" minlength="10"' }), 'At least 10 characters with letters and numbers.')}
-    <div class="err" id="formErr"></div><button class="btn primary" type="submit">Create account</button></form>
-    <p class="auth-switch">Already have an account? <a data-act="authView" data-view="login">Sign in</a></p>`;
-  else body = `<h1>Sign in</h1><p class="muted">Merchants and Digital Hub staff use the same sign-in.</p>
+  const brand = `<div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Wallet · Cash App Pay</small></div></div>`;
+  const body = v === 'mfa'
+    ? `<h1>Two-factor verification</h1><p class="muted">Enter the 6-digit code from your authenticator app.</p>
+    <form class="stack" data-form="mfaLogin">${field('Code', input('code', { req: true, extra: 'inputmode="numeric" autocomplete="one-time-code" maxlength="6"' }))}<div class="err" id="formErr"></div><button class="btn primary" type="submit">Verify</button></form>`
+    : `<h1>Sign in</h1><p class="muted">Your Digital Hub Wallet and Cash App Pay portal.</p>
     <form class="stack" data-form="login">${field('Email', input('email', { type: 'email', req: true, extra: 'autocomplete="username"' }))}${field('Password', input('password', { type: 'password', req: true, extra: 'autocomplete="current-password"' }))}
     <div class="err" id="formErr"></div><button class="btn primary" type="submit">Sign in</button></form>
-    <p class="auth-switch">New merchant? <a data-act="authView" data-view="signup">Create an account</a></p>`;
+    <p class="auth-switch">Team members get their sign-in from the account owner.</p>`;
   return `<div class="auth-wrap"><div class="auth-card">${brand}${body}<span class="faint" style="font-size:.75rem;text-align:center">Protected by 2FA, session cookies and audit logging.</span></div></div>`;
 }
 FORM.login = async f => { const r = await api('POST', '/auth/login', f); if (r.mfa_required) { App.authView = 'mfa'; return render(); } await loadMe(); };
 FORM.mfaLogin = async f => { await api('POST', '/auth/mfa', f); App.authView = 'login'; await loadMe(); };
-FORM.signup = async f => { await api('POST', '/auth/signup', f); App.mode = 'test'; lsSet('dh.mode', 'test'); await loadMe(); location.hash = '#/golive'; toast('Welcome! You are in test mode.'); };
 
-/* 2FA enrollment + password (shared by merchants and staff) */
+/* 2FA enrollment + password */
 ACT.setupMfa = () => run(async () => {
   const r = await api('POST', '/auth/mfa/setup');
   openModal({ title: 'Enable two-factor authentication', body: `<p class="muted">Scan with Google Authenticator, Microsoft Authenticator, 1Password or Authy, then enter the 6-digit code.</p>
@@ -179,21 +160,20 @@ VIEWS.account = async () => {
   const u = App.me.user;
   return head('Account', 'Your security', esc(u.email))
     + `<div class="grid g2"><div class="card stack"><div class="card-head" style="margin:0"><h2>Two-factor authentication</h2>${badge(u.mfa_enabled ? 'enabled' : 'pending', u.mfa_enabled ? 'on' : 'off')}</div>
-      <p class="muted">${isStaff() ? 'Required for every privileged admin action.' : 'Required for live keys and live payouts.'}</p>${u.mfa_enabled ? '<p class="faint">To reset 2FA, ask an account owner or Digital Hub support.</p>' : '<button class="btn primary" data-act="setupMfa">Set up 2FA</button>'}</div>
+      <p class="muted">Required for live API keys and production Cash App changes.</p>${u.mfa_enabled ? '<p class="faint">To reset 2FA, ask the account owner.</p>' : '<button class="btn primary" data-act="setupMfa">Set up 2FA</button>'}</div>
      <form class="card stack" data-form="password"><h2>Change password</h2>${field('Current password', input('current', { type: 'password', req: true, extra: 'autocomplete="current-password"' }))}
       ${field('New password', input('password', { type: 'password', req: true, extra: 'autocomplete="new-password" minlength="10"' }))}${field('Confirm new password', input('confirm', { type: 'password', req: true, extra: 'autocomplete="new-password"' }))}
       <div class="err" id="formErr"></div><button class="btn primary" type="submit">Change password</button></form></div>`;
 };
 
 /* ---------------- shell & router ---------------- */
-function route() { const h = (location.hash || '').replace(/^#\/?/, ''); const [r, ...args] = h.split('/'); return { r: r || (isStaff() ? 'a-overview' : 'home'), args }; }
+function route() { const h = (location.hash || '').replace(/^#\/?/, ''); const [r, ...args] = h.split('/'); return { r: r || 'home', args }; }
 function go(r) { closeDrawer(); location.hash = '#/' + r; }
 function shell() {
-  const u = App.me.user, staff = isStaff();
-  const ws = staff ? `Super admin · ${esc(App.me.role?.label || '')}` : esc(App.me.merchant?.name || 'Merchant');
-  return `${App.mode === 'test' ? '<div class="test-banner">Test mode · simulated money · test cards and sandbox crypto only</div>' : ''}
+  const u = App.me.user, ws = esc(App.me.merchant?.name || 'Store');
+  return `${App.mode === 'test' ? '<div class="test-banner">Test mode · Cash App sandbox · no real money moves</div>' : ''}
   <header class="topbar"><button class="btn sm menu-btn" data-act="menu" aria-label="Open navigation">☰</button>
-    <div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>
+    <div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Wallet · Cash App Pay</small></div></div>
     <span class="ws-label">${ws}</span><span class="spacer"></span>
     <button class="mode-switch" role="switch" aria-checked="${App.mode === 'test'}" data-act="toggleMode" title="Switch between test and live data"><span class="knob"></span>Test mode</button>
     <a class="user-chip" href="#/account" title="Your security">${badge(u.mfa_enabled ? 'enabled' : 'pending', u.mfa_enabled ? '2FA' : 'no 2FA')}<span>${esc(u.email)}</span></a>
@@ -201,7 +181,7 @@ function shell() {
   <div class="shell"><nav class="rail" id="rail" aria-label="Modules"></nav><main id="main"></main></div>`;
 }
 function rail(cur) {
-  const groups = isStaff() ? NAV.admin : NAV.merchant, counts = App.counts || {};
+  const groups = NAV.merchant, counts = App.counts || {};
   return groups.map(([g, items]) => `<div class="navgroup">${esc(g)}</div><div class="nav">${items.map(([r, l]) => `<a href="#/${r}" ${cur === r ? 'aria-current="page"' : ''}>${esc(l)}${counts[r] ? `<span class="count">${counts[r]}</span>` : ''}</a>`).join('')}</div>`).join('')
     + `<div class="navgroup">Account</div><div class="nav"><a href="#/account" ${cur === 'account' ? 'aria-current="page"' : ''}>Your security</a></div>`;
 }
@@ -211,9 +191,8 @@ async function render() {
   if (!App.me) { root.innerHTML = authScreen(); return; }
   if (!$('#main') || root.dataset.mode !== App.mode || root.dataset.user !== App.me.user.id) { root.innerHTML = shell(); root.dataset.mode = App.mode; root.dataset.user = App.me.user.id; }
   const { r, args } = route(), seq = ++renderSeq;
-  const valid = (isStaff() ? NAV.admin : NAV.merchant).some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
-  const name = valid ? r : (isStaff() ? 'a-overview' : 'home');
-  if (isStaff()) App.counts = await api('GET', '/a-api/overview').then(o => ({ 'a-approvals': Object.values(o.queues).reduce((a, b) => a + b, 0) - o.queues.alerts, 'a-alerts': o.queues.alerts })).catch(() => ({}));
+  const valid = NAV.merchant.some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
+  const name = valid ? r : 'home';
   $('#rail').innerHTML = rail(name); $('#rail').classList.remove('open');
   const main = $('#main'); if (!main.firstChild) main.innerHTML = '<div class="loading">Loading…</div>';
   try { const html = await VIEWS[name](...args); if (seq !== renderSeq) return; main.innerHTML = `<div class="page">${html}</div>`; MOUNT[name]?.(); }

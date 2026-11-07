@@ -40,15 +40,13 @@ const newTotpSecret = () => base32(crypto.randomBytes(20));
 function verifyTotp(secret, code) { code = String(code || '').replace(/\s/g, ''); if (!/^\d{6}$/.test(code)) return false; return [-1, 0, 1].some(w => safeEqual(totp(secret, Date.now() + w * 30000), code)); }
 
 /* ---- money ---- */
-const CURRENCIES = {
-  USD: { fx: 1, sym: '$' }, EUR: { fx: 0.92, sym: '€' }, GBP: { fx: 0.79, sym: '£' }, AED: { fx: 3.6725, sym: 'AED ' }, PKR: { fx: 281.5, sym: 'Rs ' },
-  USDT: { fx: 0.9998, crypto: true }, USDC: { fx: 1.0001, crypto: true },
-};
-const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'], STABLE = ['USDT', 'USDC'];
-function convert(minor, from, to, spreadBps = 0) { if (from === to) return minor; return Math.round(minor / CURRENCIES[from].fx * CURRENCIES[to].fx * (1 - spreadBps / 10000)); }
-const toUSD = (minor, cur) => convert(minor, cur, 'USD');
+// US dollars only: Cash App Pay charges and settles in USD.
+const CURRENCIES = { USD: { fx: 1, sym: '$' } };
+const FIAT = ['USD'];
+function convert(minor, from = 'USD', to = 'USD') { if (from !== to) throw new Error('Only USD is supported.'); return minor; }
+const toUSD = minor => minor;
 const pct = (minor, p) => Math.round(minor * p / 100);
-function fmt(minor, cur) { const s = (Math.abs(minor) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); const c = CURRENCIES[cur]; return (minor < 0 ? '-' : '') + (c?.crypto ? `${s} ${cur}` : `${c?.sym ?? ''}${s}`); }
+function fmt(minor) { const s = (Math.abs(minor) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return (minor < 0 ? '-' : '') + '$' + s; }
 
 /* ---- misc ---- */
 const isEmail = s => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) && s.length <= 200;
@@ -72,4 +70,4 @@ function zip(files) {
 }
 
 module.exports = { DAY, rid, id, sha256, hmacHex, safeEqual, HttpError, bad, hashPassword, verifyPassword, passwordProblem, seal, unseal, totp, newTotpSecret, verifyTotp,
-  CURRENCIES, FIAT, STABLE, convert, toUSD, pct, fmt, isEmail, isUrl, str, luhn, zip };
+  CURRENCIES, FIAT, convert, toUSD, pct, fmt, isEmail, isUrl, str, luhn, zip };

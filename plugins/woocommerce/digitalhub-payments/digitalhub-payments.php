@@ -67,7 +67,7 @@ add_action('plugins_loaded', function () {
                 'api_base'        => ['title' => 'Digital Hub URL', 'type' => 'text', 'description' => 'For example https://pay.yourdomain.com (no trailing slash).', 'default' => ''],
                 'test_mode'       => ['title' => 'Test mode', 'type' => 'checkbox', 'label' => 'Use the test secret key (Cash App sandbox, no real money)', 'default' => 'yes'],
                 'test_secret_key' => ['title' => 'Test secret key', 'type' => 'password', 'description' => 'dh_test_sk_… from Developers & API → API keys'],
-                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (available after go-live and Cash App production registration)'],
+                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (available once live Cash App payments are on)'],
                 'webhook_secret'  => ['title' => 'Webhook signing secret', 'type' => 'password', 'description' => 'Create a webhook endpoint in Digital Hub with URL <code>' . esc_html(home_url('/wc-api/digitalhub/')) . '</code> and paste its whsec_… secret here.'],
             ];
         }

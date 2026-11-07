@@ -1,6 +1,7 @@
 'use strict';
-/* Dashboard authentication (merchant users + Digital Hub staff): scrypt passwords,
-   HttpOnly session cookies, TOTP 2FA, login throttling and role-based permissions. */
+/* Wallet portal authentication for the store account's team: scrypt passwords,
+   HttpOnly session cookies, TOTP 2FA, login throttling and role-based permissions.
+   There is no public sign-up: the owner comes from ADMIN_EMAIL, and the owner adds team members. */
 const config = require('./config');
 const store = require('./db');
 const U = require('./util');
@@ -8,24 +9,10 @@ const core = require('./core');
 const { HttpError, bad } = U;
 
 const SESSION_MS = 12 * 3600000;
-const STAFF_PERMS = {
-  'merchants.manage': 'Approve, reject, suspend merchants; KYB / KYC / AML', 'merchants.controls': 'Permissions, limits, risk controls', 'merchants.pricing': 'Fees and reserves',
-  'merchants.live': 'Activate live mode', 'providers.authorize': 'Cash App Pay registration and provider settings', 'destinations.review': 'Approve wallets and bank accounts',
-  'payouts.approve': 'Approve or reject payouts', 'payouts.execute': 'Record executed payouts / refunds', 'finance.adjust': 'Ledger adjustments (maker-checker)',
-  'payments.manage': 'Disputes and payment exceptions', 'alerts.manage': 'Risk alerts and rules', 'platform.settings': 'Platform settings and jobs', 'staff.manage': 'Staff, roles and access',
-};
-const STAFF_ROLES = {
-  super_admin: { label: 'Super admin', perms: Object.keys(STAFF_PERMS) },
-  compliance: { label: 'Compliance', perms: ['merchants.manage', 'merchants.controls', 'merchants.live', 'providers.authorize', 'destinations.review', 'alerts.manage'] },
-  finance: { label: 'Finance ops', perms: ['merchants.pricing', 'payouts.approve', 'payouts.execute', 'finance.adjust', 'payments.manage'] },
-  risk: { label: 'Risk analyst', perms: ['merchants.controls', 'alerts.manage', 'payments.manage'] },
-  support: { label: 'Support', perms: ['payments.manage'] },
-  viewer: { label: 'Read-only auditor', perms: [] },
-};
 const MERCHANT_ROLES = {
-  owner: { label: 'Owner', perms: ['read', 'payments', 'refunds', 'payouts', 'developers', 'settings', 'team'] },
-  admin: { label: 'Admin', perms: ['read', 'payments', 'refunds', 'payouts', 'developers', 'settings'] },
-  finance: { label: 'Finance', perms: ['read', 'refunds', 'payouts'] },
+  owner: { label: 'Owner', perms: ['read', 'payments', 'refunds', 'finance', 'developers', 'settings', 'team'] },
+  admin: { label: 'Admin', perms: ['read', 'payments', 'refunds', 'finance', 'developers', 'settings'] },
+  finance: { label: 'Finance', perms: ['read', 'refunds', 'finance'] },
   developer: { label: 'Developer', perms: ['read', 'developers'] },
   support: { label: 'Support', perms: ['read', 'refunds'] },
   viewer: { label: 'Viewer', perms: ['read'] },
@@ -51,23 +38,18 @@ function readSession(ctx) {
   const s = store.byKey('sessions', U.sha256(token));
   if (!s || s.status !== 'active' || Date.now() > s.expires_at) return null;
   const user = store.get('users', s.user_id);
-  if (!user || user.status !== 'active') return null;
+  if (!user || !activeMember(user)) return null;
   return { session: s, user };
 }
-/** Require a signed-in user. kind: 'merchant' | 'staff'. Dashboard state changes also require the X-Requested-With header (CSRF defence). */
-function requireUser(ctx, kind) {
+/** Only active team members of the store account can sign in. */
+const activeMember = u => u.status === 'active' && u.kind === 'merchant' && u.merchant_id === core.accountId();
+/** Require a signed-in team member. Dashboard state changes also require the X-Requested-With header (CSRF defence). */
+function requireUser(ctx) {
   const a = readSession(ctx);
   if (!a) throw new HttpError(401, 'not_signed_in', 'Please sign in.');
   if (!a.session.mfa_ok) throw new HttpError(401, 'mfa_required', 'Two-factor verification required.');
-  if (kind && a.user.kind !== kind) throw new HttpError(403, 'wrong_workspace', 'This area is not available to your account.');
   if (ctx.method !== 'GET' && ctx.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
   return a;
-}
-function staffCan(user, perm) { return !!STAFF_ROLES[user.role]?.perms.includes(perm) && (user.mfa_enabled || !config.requireStaffMfa); }
-function needStaff(user, perm) {
-  if (staffCan(user, perm)) return;
-  if (STAFF_ROLES[user.role]?.perms.includes(perm)) throw new HttpError(403, 'mfa_enrollment_required', 'Enroll two-factor authentication before privileged actions.');
-  throw new HttpError(403, 'forbidden', `Your role (${STAFF_ROLES[user.role]?.label}) cannot ${STAFF_PERMS[perm]?.toLowerCase() || perm}.`);
 }
 function needMerchant(user, perm) { if (!MERCHANT_ROLES[user.role]?.perms.includes(perm)) throw new HttpError(403, 'forbidden', `Your role (${MERCHANT_ROLES[user.role]?.label}) cannot do this.`); }
 
@@ -80,24 +62,10 @@ function throttle(key) {
 }
 
 function routes(r) {
-  r('POST', '/auth/signup', ctx => {
-    const b = ctx.body, t = throttle('signup:' + ctx.ip);
-    const business = U.str(b.business_name, 120); if (business.length < 2) throw bad('Enter your business name.');
-    const country = U.str(b.country, 2).toUpperCase(); if (!/^[A-Z]{2}$/.test(country)) throw bad('Choose your country.');
-    let user;
-    store.tx(() => {
-      const m = core.newMerchant({ name: business, legal_name: business, country, website: U.str(b.website, 200), support_email: String(b.email || '').toLowerCase() });
-      store.put('merchants', m);
-      user = createUser({ email: b.email, name: b.name, password: b.password, kind: 'merchant', role: 'owner', merchant_id: m.id });
-      core.audit(user.email, 'merchant.signup', m.id, business, m.id);
-    });
-    t.ok(); startSession(ctx, user, true);
-    return { user: publicUser(user) };
-  });
   r('POST', '/auth/login', async ctx => {
     const email = String(ctx.body.email || '').trim().toLowerCase(), t = throttle('login:' + ctx.ip + ':' + email);
     const u = store.byKey('users', email);
-    if (!u || u.status !== 'active' || !U.verifyPassword(String(ctx.body.password || ''), u.password_hash)) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
+    if (!u || !activeMember(u) || !U.verifyPassword(String(ctx.body.password || ''), u.password_hash)) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
     t.ok(); startSession(ctx, u, !u.mfa_enabled);
     u.last_login = Date.now(); store.put('users', u);
     core.audit(u.email, 'auth.login', u.id, ctx.ip, u.merchant_id);
@@ -118,11 +86,8 @@ function routes(r) {
     const a = readSession(ctx);
     if (!a) return { user: null };
     if (!a.session.mfa_ok) return { user: null, mfa_pending: true };
-    const out = { user: publicUser(a.user), config: { livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
-    if (a.user.kind === 'merchant') out.merchant = core.normalizeMerchant(store.get('merchants', a.user.merchant_id));
-    if (a.user.kind === 'staff') { out.role = STAFF_ROLES[a.user.role]; out.perms = Object.keys(STAFF_PERMS).filter(p => staffCan(a.user, p)); }
-    else out.perms = MERCHANT_ROLES[a.user.role].perms;
-    return out;
+    return { user: publicUser(a.user), config: { livePayments: config.livePayments, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl },
+      merchant: core.account(), perms: MERCHANT_ROLES[a.user.role]?.perms || [] };
   });
   /* 2FA enrollment (any signed-in user) */
   r('POST', '/auth/mfa/setup', ctx => {
@@ -147,4 +112,4 @@ function routes(r) {
   });
 }
 
-module.exports = { routes, createUser, publicUser, requireUser, readSession, staffCan, needStaff, needMerchant, STAFF_ROLES, STAFF_PERMS, MERCHANT_ROLES };
+module.exports = { routes, createUser, publicUser, requireUser, readSession, needMerchant, activeMember, MERCHANT_ROLES };

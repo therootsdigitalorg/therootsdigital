@@ -8,9 +8,9 @@ const U = require('../util');
 const core = require('../core');
 const { HttpError, bad } = U;
 
-const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
+const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'webhooks:write', 'events:read'];
 const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.succeeded', 'refund.failed',
-  'payment.created', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.updated'];
+  'payment.created', 'dispute.created', 'dispute.updated'];
 
 const rate = new Map();
 function authenticate(ctx) {
@@ -70,14 +70,12 @@ function routes(r) {
   });
   get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicRefund, lim(ctx.query)));
 
-  get('/v1/balance', 'balance:read', (ctx, a) => ({ object: 'balance', livemode: a.mode === 'live', balances: Object.entries(L.merchantBalances(a.m.id, a.mode)).map(([currency, b]) => ({ currency, ...b })) }));
+  get('/v1/balance', 'balance:read', (ctx, a) => { const b = L.merchantBalances(a.m.id, a.mode).USD || {}; return { object: 'balance', livemode: a.mode === 'live', currency: 'USD', awaiting_settlement: b.pending || 0, settled: b.available || 0 }; });
 
   post('/v1/payment_links', 'links:write', (ctx, a) => core.publicLink(core.createLink(a.m, a.mode, ctx.body, actor(a))));
   get('/v1/payment_links', 'payments:read', (ctx, a) => listOf(store.list('links', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicLink, lim(ctx.query)));
   post('/v1/payment_links/:id/deactivate', 'links:write', (ctx, a) => { const l = owned('links', ctx.params.id, a); l.status = 'deactivated'; store.put('links', l); return core.publicLink(l); });
 
-  get('/v1/payouts', 'balance:read', (ctx, a) => listOf(store.list('payouts', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicPayout, lim(ctx.query)));
-  post('/v1/payouts', 'payouts:write', (ctx, a) => core.publicPayout(core.requestPayout(a.m, a.mode, { currency: ctx.body.currency, amount: Number(ctx.body.amount), destination: ctx.body.destination }, actor(a))));
 
   get('/v1/events', 'events:read', (ctx, a) => listOf(store.list('events', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }).filter(e => !ctx.query.type || e.type === ctx.query.type), core.publicEvent, lim(ctx.query)));
   get('/v1/events/:id', 'events:read', (ctx, a) => core.publicEvent(owned('events', ctx.params.id, a)));

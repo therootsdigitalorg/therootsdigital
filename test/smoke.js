@@ -1,6 +1,6 @@
 'use strict';
 /* End-to-end smoke test: boots the server on a throwaway database and drives the public API, hosted
-   Cash App Pay checkout (local simulator), merchant dashboard, Super Admin API, webhooks, ledger and
+   Cash App Pay checkout (local simulator), the single-account wallet portal, webhooks, ledger and
    the real Cash App adapter against a fake Cash App server (request signing, webhook verification).
    Usage: npm test */
 const os = require('node:os');
@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dh-test-'));
 for (const k of Object.keys(process.env)) if (k.startsWith('CASHAPP_')) delete process.env[k]; // force the local simulator
-Object.assign(process.env, { DB_PATH: path.join(tmp, 'test.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', SANDBOX_DAY_MS: '5000', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1' });
+Object.assign(process.env, { DB_PATH: path.join(tmp, 'test.db'), PORT: '0', SEED_DEMO: '1', ADMIN_EMAIL: 'owner@store.test', ADMIN_PASSWORD: 'OwnerPass12345', SANDBOX_DAY_MS: '5000', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1' });
 const { server, start } = require('../server/index');
 const DigitalHub = require('../sdk/node/digitalhub');
 const core = require('../server/core'), store = require('../server/db'), CA = require('../server/cashapp'), config = require('../server/config');
@@ -33,10 +33,10 @@ function client(extra = {}) {
 (async () => {
   await new Promise(r => { const orig = server.listen.bind(server); server.listen = (port, cb) => orig(0, () => { BASE = `http://127.0.0.1:${server.address().port}`; cb && cb(); r(); }); start(); });
   const creds = fs.readFileSync(path.join(tmp, 'first-run-credentials.txt'), 'utf8');
-  const merchantPw = creds.match(/owner@northwind\.test\s+password: (\S+)/)[1], secret = creds.match(/dh_test_sk_\w+/)[0];
+  const OWNER = 'owner@store.test', merchantPw = 'OwnerPass12345', secret = creds.match(/dh_test_sk_\w+/)[0];
   const dh = new DigitalHub(secret, { baseUrl: BASE });
   const pub = client();
-  const nwId = store.byKey('users', 'owner@northwind.test').merchant_id;
+  const nwId = core.accountId();
   console.log(`\nDigital Hub smoke test on ${BASE} (${CA.environmentLabel('test')})\n`);
 
   // Customer flow helpers: what checkout.js and the Cash App approval screen do.
@@ -135,15 +135,14 @@ function client(extra = {}) {
   });
   let manual;
   await step('Manual capture: authorized → order not paid; capture → session flips to paid', async () => {
-    const a = client(); await a('POST', '/auth/login', { email: 'admin@digitalhub.local', password: 'AdminPass12345' });
-    const m = core.merchant(nwId);
-    assert.equal((await a('PATCH', `/a-api/merchants/${nwId}/pricing`, { platPct: m.fees.platPct, platFixedUSD: m.fees.platFixedUSD, disputeFeeUSD: m.fees.disputeFeeUSD, reservePct: m.reserve.pct, reserveDays: m.reserve.days, captureMode: 'manual' })).status, 200);
+    const a = client(); await a('POST', '/auth/login', { email: OWNER, password: merchantPw });
+    assert.equal((await a('PATCH', '/m-api/settings', { captureMode: 'manual' })).status, 200);
     const r = await pay(3300, { metadata: { order_id: '77' } }); manual = r;
     assert.equal(r.p.status, 'authorized'); assert.equal((await dh.checkout.retrieve(r.s.id)).payment_status, 'authorized');
     const c = await dh.payments.capture(r.p.id); assert.equal(c.status, 'captured');
     assert.equal((await dh.checkout.retrieve(r.s.id)).payment_status, 'paid');
     const v = await pay(1200); assert.equal((await dh.payments.cancel(v.p.id)).status, 'canceled');
-    await a('PATCH', `/a-api/merchants/${nwId}/pricing`, { platPct: m.fees.platPct, platFixedUSD: m.fees.platFixedUSD, disputeFeeUSD: m.fees.disputeFeeUSD, reservePct: m.reserve.pct, reserveDays: m.reserve.days, captureMode: 'auto' });
+    await a('PATCH', '/m-api/settings', { captureMode: 'auto' });
   });
   let dispute;
   await step('Sandbox DISPUTE: 88.01 payment opens a Cash App dispute; funds held; evidence + challenge; won returns funds', async () => {
@@ -153,7 +152,7 @@ function client(extra = {}) {
     await wait(2100); await core.runCashAppSync();
     const d = store.list('disputes', { merchant_id: nwId }).find(x => x.payment_id === p.id); assert.ok(d, 'dispute opened'); dispute = d;
     assert.equal(d.status, 'needs_response'); assert.equal(store.get('payments', p.id).status, 'disputed');
-    const m = client(); await m('POST', '/auth/login', { email: 'owner@northwind.test', password: merchantPw });
+    const m = client(); await m('POST', '/auth/login', { email: OWNER, password: merchantPw });
     assert.equal((await m('POST', `/m-api/disputes/${d.id}/evidence`, { category: 'PROOF_OF_DELIVERY_DOCUMENTATION', text: 'Delivered by UPS 1Z999, signed by customer.' })).status, 200);
     assert.equal((await m('POST', `/m-api/disputes/${d.id}/challenge`)).body.status, 'under_review');
     CA.sim.setDisputeState(d.cashapp_dispute_id, 'WON'); await core.flushSimEvents();
@@ -219,98 +218,103 @@ function client(extra = {}) {
     for (const t of ['payment.failed', 'payment.refunded', 'refund.failed', 'dispute.created', 'dispute.updated']) assert.ok(received.some(e => e.type === t), t);
     assert.ok(received.every(e => e.id?.startsWith('evt_')));
   });
-  await step('API: invalid key and tenant isolation', async () => {
+  await step('API: invalid key; only the store account can take payments', async () => {
     assert.equal((await pub('GET', '/v1/payments', null, { Authorization: 'Bearer dh_test_sk_' + 'x'.repeat(40) })).status, 401);
-    const bb = core.normalizeMerchant(store.list('merchants', {}).find(x => x.name === 'Bluebird Bakery'));
-    const s2 = core.createSession(bb, 'test', { amount: 900, currency: 'USD', description: 'Other tenant' }, 'test');
-    const foreign = await core.startCashApp(s2, { name: 'Cy Test' });
-    assert.equal((await pub('GET', '/v1/payments/' + foreign.id, null, { Authorization: 'Bearer ' + secret })).status, 404, 'cross-tenant read must 404');
-    assert.equal((await pub('GET', '/v1/checkout/sessions/' + s2.id, null, { Authorization: 'Bearer ' + secret })).status, 404);
-    assert.equal((await pub('POST', '/v1/refunds', { payment: foreign.id }, { Authorization: 'Bearer ' + secret })).status, 404);
+    // A leftover merchant from an older multi-merchant database: its keys and checkouts no longer work.
+    const old = core.newMerchant({ name: 'Old Tenant' }); store.put('merchants', old);
+    const { secret: oldKey } = require('../server/routes/merchant').issueKey(old, 'test', { name: 'old', scopes: ['*'] }, 'test');
+    assert.equal((await pub('GET', '/v1/payments', null, { Authorization: 'Bearer ' + oldKey })).status, 403);
+    assert.throws(() => core.createSession(old, 'test', { amount: 900, currency: 'USD', description: 'x' }), /not active/);
+    const other = store.list('payments', {}, { limit: 1 })[0]; other && assert.equal((await pub('GET', '/v1/payments/' + other.id, null, { Authorization: 'Bearer ' + oldKey })).status, 403);
   });
 
   const m = client();
-  await step('Merchant: sign in, CSRF header enforced, overview and Cash App status load', async () => {
+  await step('Portal: owner signs in, CSRF header enforced, overview and Cash App status load', async () => {
     const bad = await fetch(BASE + '/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal(bad.status, 403);
-    assert.equal((await m('POST', '/auth/login', { email: 'owner@northwind.test', password: 'wrong-password-1' })).status, 401);
-    assert.equal((await m('POST', '/auth/login', { email: 'owner@northwind.test', password: merchantPw })).status, 200);
+    assert.equal((await m('POST', '/auth/login', { email: OWNER, password: 'wrong-password-1' })).status, 401);
+    assert.equal((await m('POST', '/auth/login', { email: OWNER, password: merchantPw })).status, 200);
     const o = await m('GET', '/m-api/overview'); assert.ok(o.body.count > 0); assert.equal(o.body.cashapp.status, 'ACTIVE');
-    const ca = await m('GET', '/m-api/cashapp'); assert.equal(ca.status, 200); assert.ok(!JSON.stringify(ca.body).match(/KEY_SECRET|keySecret|webhookSecret/));
+    const ca = await m('GET', '/m-api/cashapp'); assert.equal(ca.status, 200); assert.ok(!JSON.stringify(ca.body).match(/keySecret|webhookSecret|"secret"/));
   });
-  await step('Merchant: declined attempt and refunds visible; wallet shows pending vs available', async () => {
+  await step('Portal: declined attempt and refunds visible; wallet in dollars with awaiting/settled', async () => {
     const rows = (await m('GET', '/m-api/payments')).body.data;
     assert.equal(rows.find(p => p.id === declined.id)?.status, 'declined');
     const details = await m('GET', `/m-api/payments/${payment.id}`); assert.equal(details.body.refunds.length, 2);
-    const w = await m('GET', '/m-api/wallet'); assert.equal(w.status, 200);
+    const w = await m('GET', '/m-api/wallet'); assert.equal(w.status, 200); assert.ok(w.body.balance.pending > 0); assert.ok('disputed_held' in w.body);
+    const bal = await pub('GET', '/v1/balance', null, { Authorization: 'Bearer ' + secret }); assert.equal(bal.body.currency, 'USD'); assert.equal(bal.body.awaiting_settlement, w.body.balance.pending);
+    const fees = store.list('payments', { merchant_id: nwId, mode: 'test', status: 'captured' }, { limit: 50 }).filter(p => p.fees);
+    assert.ok(fees.length && fees.every(p => p.fees.platform === 0), 'no platform fee for the single client');
     assert.equal((await m('GET', '/m-api/disputes')).body.length >= 1, true);
   });
-  await step('Merchant: create restricted key (secret shown once, stored hashed)', async () => { const r = await m('POST', '/m-api/keys', { name: 'Woo', scopes: ['checkout:write', 'payments:read'] }); assert.match(r.body.secret, /^dh_test_sk_/); const row = store.byKey('api_keys', require('../server/util').sha256(r.body.secret)); assert.ok(row && !JSON.stringify(row).includes(r.body.secret)); });
-  await step('Merchant: live keys blocked until go-live', async () => { assert.equal((await m('POST', '/m-api/keys', { name: 'Live' }, { 'X-DH-Mode': 'live' })).status, 400); });
-  await step('Merchant: cannot register Cash App production from the dashboard', async () => { assert.notEqual((await m('POST', '/m-api/cashapp/register', {}, { 'X-DH-Mode': 'live' })).status, 200); });
+  await step('Portal: create restricted key (secret shown once, stored hashed)', async () => { const r = await m('POST', '/m-api/keys', { name: 'Woo', scopes: ['checkout:write', 'payments:read'] }); assert.match(r.body.secret, /^dh_test_sk_/); const row = store.byKey('api_keys', require('../server/util').sha256(r.body.secret)); assert.ok(row && !JSON.stringify(row).includes(r.body.secret)); });
+  await step('Portal: live keys blocked until live payments are on', async () => { assert.equal((await m('POST', '/m-api/keys', { name: 'Live' }, { 'X-DH-Mode': 'live' })).status, 400); });
+  await step('Portal: production registration needs Cash App production credentials on the server', async () => {
+    const r = await m('POST', '/m-api/cashapp/register', {}, { 'X-DH-Mode': 'live' }); assert.equal(r.status, 400); assert.match(r.body.error.message, /production credentials/);
+  });
 
-  const a = client();
-  let po;
-  await step('Admin: sign in and see Cash App status and queues', async () => {
-    assert.equal((await a('POST', '/auth/login', { email: 'admin@digitalhub.local', password: 'AdminPass12345' })).status, 200);
-    const o = await a('GET', '/a-api/overview'); assert.equal(o.status, 200); assert.ok('cashapp_registrations' in o.body.queues);
-    const c = await a('GET', '/a-api/cashapp'); assert.equal(c.status, 200); assert.equal(c.body.environments.length, 2);
-    assert.ok(c.body.logs.length > 0 || c.body.events.length > 0);
-    assert.ok(!JSON.stringify(c.body).includes('CASH_test_webhook_secret'));
+  await step('Portal: Cash App settings show credential status, never secrets; connection test works', async () => {
+    const c = await m('GET', '/m-api/cashapp'); assert.equal(c.status, 200); assert.equal(c.body.environments.length, 2);
+    assert.ok(c.body.events.length > 0); assert.ok(!JSON.stringify(c.body).includes('CASH_test_webhook_secret'));
+    assert.equal((await m('POST', '/m-api/cashapp/test-connection')).body.ok, true);
+    assert.equal((await m('POST', '/m-api/cashapp/webhook-endpoint')).status, 400, 'simulator has no webhook registration');
   });
-  await step('Admin: merchants cannot reach admin API', async () => { assert.equal((await m('GET', '/a-api/overview')).status, 403); });
-  await step('Admin: record a Cash App settlement → wallet available → payout approved', async () => {
-    const before = (await a('GET', '/a-api/settlements')).body.unsettled.length; assert.ok(before > 0);
-    const r = await a('POST', '/a-api/settlements', { merchant: nwId, reference: 'CASHAPP-STL-0001' }); assert.ok(r.body.settled > 0, JSON.stringify(r.body));
-    const bal = (await m('GET', '/m-api/balances')).body.balances.USD;
-    const bank = (await m('GET', '/m-api/destinations')).body.banks.find(b => b.status === 'verified');
-    const res = await m('POST', '/m-api/payouts', { currency: 'USD', amount: Math.min(bal.available, 6000), destination: bank.id, idempotency_key: 'po-1' });
-    assert.equal(res.status, 200, JSON.stringify(res.body) + ' bal=' + JSON.stringify(bal)); po = res.body;
-    if (po.status === 'pending_approval') po = (await a('POST', `/a-api/payouts/${po.id}/approve`)).body;
-    assert.equal(po.status, 'completed');
+  await step('Portal: record a Cash App settlement → awaiting moves to settled', async () => {
+    const w0 = (await m('GET', '/m-api/wallet')).body; assert.ok(w0.unsettled.length > 0);
+    const r = await m('POST', '/m-api/settlements', { reference: 'CASHAPP-STL-0001' }); assert.ok(r.body.settled > 0, JSON.stringify(r.body));
+    const w1 = (await m('GET', '/m-api/wallet')).body; assert.equal(w1.balance.pending, 0); assert.ok(w1.balance.available > w0.balance.available);
+    assert.ok(w1.settlements.some(x => x.reference === 'CASHAPP-STL-0001'));
   });
-  await step('Admin: refund and sync from the transactions page', async () => {
+  await step('Portal: refund and sync from the transactions page; activity log records it', async () => {
     const { p } = await pay(2000);
-    assert.equal((await a('POST', `/a-api/payments/${p.id}/sync`)).status, 200);
-    assert.equal((await a('POST', `/a-api/payments/${p.id}/refund`, { amount: 500, reason: 'admin test' })).body.status, 'succeeded');
+    assert.equal((await m('POST', `/m-api/payments/${p.id}/sync`)).status, 200);
+    assert.equal((await m('POST', `/m-api/payments/${p.id}/refund`, { amount: 500, reason: 'requested_by_customer' })).body.status, 'succeeded');
+    assert.ok((await m('GET', '/m-api/activity')).body.some(a => a.action === 'refund.create'));
   });
-  await step('Admin: KYB approval blocked until checks + KYC + AML complete; then Cash App registration', async () => {
-    const bb = (await a('GET', '/a-api/merchants?q=Bluebird')).body[0];
-    assert.equal((await a('POST', `/a-api/merchants/${bb.id}/status`, { status: 'approved' })).status, 400);
-    for (const check of ['registration', 'owners', 'website', 'sanctions', 'bank']) await a('POST', `/a-api/merchants/${bb.id}/kyb`, { check, value: true });
-    await a('POST', `/a-api/merchants/${bb.id}/kyb`, { owner: 0, idStatus: 'verified' });
-    await a('POST', `/a-api/merchants/${bb.id}/kyb`, { aml: true });
-    assert.equal((await a('POST', `/a-api/merchants/${bb.id}/status`, { status: 'approved' })).body.status, 'approved');
-    const det = await a('POST', `/a-api/merchants/${bb.id}/cashapp/details`, { address: { address_line_1: '42 Market St', locality: 'Oakland', administrative_district_level_1: 'CA', postal_code: '94607', country: 'US' }, category: '5462', site_url: 'https://bluebird-bakery.example' });
-    assert.equal(det.status, 200, JSON.stringify(det.body));
-    const reg = await a('POST', `/a-api/merchants/${bb.id}/cashapp/register`, { mode: 'test' }); assert.equal(reg.status, 200, JSON.stringify(reg.body));
-    assert.equal(core.merchant(bb.id).cashapp.test.status, 'ACTIVE');
-    const live = await a('POST', `/a-api/merchants/${bb.id}/live`, { enabled: true }); assert.equal(live.status, 400, 'live needs Cash App production registration');
+  await step('Portal: team member with a limited role cannot change settings', async () => {
+    const inv = await m('POST', '/m-api/team', { name: 'Sam Support', email: 'sam@store.test', role: 'support' }); assert.equal(inv.status, 200);
+    const x = client(); assert.equal((await x('POST', '/auth/login', { email: 'sam@store.test', password: inv.body.temporary_password })).status, 200);
+    assert.equal((await x('GET', '/m-api/overview')).status, 200);
+    assert.equal((await x('POST', '/m-api/cashapp/details', { address: {} })).status, 403);
+    assert.equal((await x('POST', '/m-api/settlements', { reference: 'x' })).status, 403);
   });
-  await step('Admin: maker-checker blocks self-approval of adjustments', async () => { const adj = (await a('POST', '/a-api/adjustments', { merchant: nwId, mode: 'test', currency: 'USD', amount: 500, reason: 'Smoke test goodwill credit' })).body; assert.equal((await a('POST', `/a-api/adjustments/${adj.id}/approve`)).status, 400); });
-  await step('Ledger: every reconciliation check passes', async () => { const l = await a('GET', '/a-api/ledger'); for (const c of l.body.checks) assert.ok(c.ok, c.name + ': ' + c.detail); assert.ok(l.body.trial_balance.every(t => t.debits === t.credits)); });
+  await step('Single client: no sign-up, no admin console, no payouts API', async () => {
+    assert.equal((await pub('POST', '/auth/signup', { email: 'x@y.z' })).status, 404);
+    assert.equal((await m('GET', '/a-api/overview')).status, 404);
+    assert.equal((await pub('POST', '/v1/payouts', { amount: 100 }, { Authorization: 'Bearer ' + secret })).status, 404);
+    assert.equal((await m('GET', '/m-api/destinations')).status, 404);
+  });
+  await step('Ledger: every reconciliation check passes', async () => { const l = await m('GET', '/m-api/ledger'); for (const c of l.body.checks) assert.ok(c.ok, c.name + ': ' + c.detail); assert.ok(l.body.trial_balance.every(t => t.debits === t.credits && t.currency === 'USD')); });
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
-  await step('Admin: ADMIN_EMAIL merchant sign-up with no activity is converted to super admin', async () => {
-    const { ensureAdmin } = require('../server/seed'), auth = require('../server/auth');
-    const signup = await pub('POST', '/auth/signup', { business_name: 'Owner Test', name: 'Owner', email: 'owner-admin@example.com', password: 'OwnerPass12345', country: 'US' });
-    assert.equal(signup.status, 200, JSON.stringify(signup.body));
-    const saved = [config.adminEmail, config.adminPassword]; config.adminEmail = 'owner-admin@example.com'; config.adminPassword = 'NewAdminPass12345';
+  await step('Owner bootstrap: an old platform-admin login for ADMIN_EMAIL becomes the store owner; other staff cannot sign in', async () => {
+    const { ensureOwner } = require('../server/seed'), auth = require('../server/auth');
+    auth.createUser({ email: 'old-admin@store.test', name: 'Old admin', password: 'OldAdminPass123', kind: 'staff', role: 'super_admin' });
+    auth.createUser({ email: 'other-staff@store.test', name: 'Other', password: 'OtherStaff1234', kind: 'staff', role: 'support' });
+    assert.equal((await client()('POST', '/auth/login', { email: 'old-admin@store.test', password: 'OldAdminPass123' })).status, 401);
+    const saved = [config.adminEmail, config.adminPassword]; config.adminEmail = 'old-admin@store.test'; config.adminPassword = 'NewOwnerPass123';
     try {
-      await ensureAdmin();
-      const u = store.byKey('users', 'owner-admin@example.com'); assert.equal(u.kind, 'staff'); assert.equal(u.role, 'super_admin');
-      const x = client(); assert.equal((await x('POST', '/auth/login', { email: 'owner-admin@example.com', password: 'NewAdminPass12345' })).status, 200);
-      assert.equal((await x('GET', '/a-api/overview')).status, 200);
-      assert.ok(auth && true);
+      ensureOwner(core.account());
+      const u = store.byKey('users', 'old-admin@store.test'); assert.equal(u.kind, 'merchant'); assert.equal(u.role, 'owner'); assert.equal(u.merchant_id, nwId);
+      const x = client(); assert.equal((await x('POST', '/auth/login', { email: 'old-admin@store.test', password: 'NewOwnerPass123' })).status, 200);
+      assert.equal((await x('GET', '/m-api/overview')).status, 200);
+      assert.equal((await client()('POST', '/auth/login', { email: 'other-staff@store.test', password: 'OtherStaff1234' })).status, 401);
     } finally { [config.adminEmail, config.adminPassword] = saved; }
+  });
+  await step('Owner bootstrap: an existing database keeps its data and picks the ADMIN_EMAIL merchant as the account', async () => {
+    const { ensureAccount } = require('../server/seed');
+    const before = core.accountId(); store.setMeta('account_id', null);
+    try { const m2 = ensureAccount(); assert.equal(m2.id, before, 'the merchant with the most payments is kept'); } finally { store.setMeta('account_id', before); }
   });
   await step('Downloads: WooCommerce plugin zip is the Cash App Pay gateway', async () => {
     const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50);
     const php = fs.readFileSync(path.join(__dirname, '../plugins/woocommerce/digitalhub-payments/digitalhub-payments.php'), 'utf8');
     assert.match(php, /'payment_methods' => \['cashapp'\]/); assert.match(php, /payment_status'\] === 'paid'/); assert.doesNotMatch(php, /Visa \/ Mastercard'\]|'card'\]/);
   });
-  await step('Removed providers stay removed', async () => {
+  await step('Removed: card, crypto and admin code stay removed; dollars only', async () => {
     for (const p of ['/hooks/coinbase', '/hooks/binance']) assert.equal((await pub('POST', p, {})).status, 404);
     assert.ok(!fs.existsSync(path.join(__dirname, '../server/providers.js')));
     assert.equal(crypto.randomUUID().length, 36);
+    for (const file of ['server/util.js', 'public/app.js', 'public/app-merchant.js', 'public/checkout.js']) assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), /USDT|USDC|stablecoin|PKR|EUR/, file);
+    assert.ok(!fs.existsSync(path.join(__dirname, '../public/app-admin.js')) && !fs.existsSync(path.join(__dirname, '../server/routes/admin.js')));
   });
 
   console.log(`\n${passed} checks passed${process.exitCode ? ' — SOME FAILED' : ''}.`);

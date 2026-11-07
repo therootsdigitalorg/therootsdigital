@@ -18,7 +18,6 @@ function route(method, pattern, handler) {
 require('./auth').routes(route);
 require('./routes/api').routes(route);
 require('./routes/merchant').routes(route);
-require('./routes/admin').routes(route);
 require('./routes/checkout').routes(route);
 
 const PUBLIC = path.join(config.ROOT, 'public');
@@ -76,7 +75,7 @@ const errorResult = (e, headers = {}) => {
 async function runRoute(req, match, ctx, pathname, cookiesOut) {
   const { extraHeaders } = ctx;
   try {
-    if (/^\/(auth|m-api|a-api)\//.test(pathname) && req.method !== 'GET' && req.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
+    if (/^\/(auth|m-api)\//.test(pathname) && req.method !== 'GET' && req.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
     const out = await match.handler(ctx);
     if (cookiesOut.length) extraHeaders['Set-Cookie'] = cookiesOut;
     if (out?.file) return { file: out.file, type: out.type };
@@ -93,10 +92,10 @@ async function handle(req, res) {
   const forwarded = config.serverless ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
   const ip = forwarded || (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   const pathname = decodeURIComponent(url.pathname);
-  const isApi = /^\/(v1|auth|m-api|a-api|c-api|hooks|api)\//.test(pathname);
+  const isApi = /^\/(v1|auth|m-api|c-api|hooks|api)\//.test(pathname);
 
   if (!isApi && req.method === 'GET' && !/^\/(pay|l|downloads|cashapp-sim)\//.test(pathname)) {
-    if (pathname === '/' || pathname === '/app' || pathname === '/admin') return serveStatic(res, path.join(PUBLIC, 'app.html'));
+    if (pathname === '/' || pathname === '/app') return serveStatic(res, path.join(PUBLIC, 'app.html'));
     const file = path.normalize(path.join(PUBLIC, pathname));
     if (!file.startsWith(PUBLIC)) return send(res, 403, 'Forbidden');
     return serveStatic(res, file);
