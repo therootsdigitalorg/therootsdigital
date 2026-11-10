@@ -8,8 +8,9 @@ const path = require('node:path');
 const config = require('./config');
 
 const DOCS = ['merchants', 'users', 'sessions', 'api_keys', 'checkout_sessions', 'payments', 'refunds', 'disputes', 'payouts', 'links', 'wallets', 'banks',
-  'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit'];
-const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events']);
+  'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit',
+  'merchant_wallets', 'chain_txs', 'settlements', 'api_logs'];
+const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events', 'chain_txs']); // chain_txs.k = chainId:txHash → replay protection
 const usePg = !!config.databaseUrl;
 let driver = null;
 /** Opens the database on first use: Postgres when DATABASE_URL is set, otherwise local SQLite. */
@@ -40,6 +41,10 @@ function open() {
   return (driver = db);
 }
 const db = { exec: sql => open().exec(sql), prepare: sql => open().prepare(sql) };
+function supabaseProfile(id, email) {
+  if (!usePg) throw new Error('Supabase profile lookup requires the Supabase Postgres connection.');
+  return open().supabaseProfile(id, email);
+}
 
 const parse = row => row ? JSON.parse(row.doc) : null;
 
@@ -53,6 +58,8 @@ function put(table, obj) {
 const get = (table, id) => parse(db.prepare(`SELECT doc FROM ${table} WHERE id=?`).get(String(id ?? '')));
 const byKey = (table, k) => parse(db.prepare(`SELECT doc FROM ${table} WHERE k=?`).get(String(k ?? '')));
 const del = (table, id) => db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id);
+/** Retention for high-volume operational logs (never used on money tables). */
+const prune = (table, before) => { if (!['api_logs', 'sessions', 'deliveries'].includes(table)) throw new Error('prune not allowed on ' + table); return db.prepare(`DELETE FROM ${table} WHERE created_at<?`).run(before); };
 
 /** list(table, { merchant_id, mode, status (string|array), since, until, k }, { limit, offset, asc }) */
 function list(table, f = {}, o = {}) {
@@ -106,4 +113,4 @@ async function requestTx(fn, failed = () => false) {
 function getMeta(key, def) { const r = db.prepare('SELECT value FROM meta WHERE key=?').get(key); return r ? JSON.parse(r.value) : def; }
 function setMeta(key, value) { db.prepare('INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
 
-module.exports = { db, open, usePg, requestTx, put, get, byKey, del, list, count, tx, getMeta, setMeta };
+module.exports = { db, open, usePg, requestTx, supabaseProfile, put, get, byKey, del, prune, list, count, tx, getMeta, setMeta };

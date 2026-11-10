@@ -52,7 +52,7 @@ function newMerchant({ name, legal_name, country, website, support_email }) {
     fees: { card: { acqPct: 2.2, acqFixedUSD: 20, platPct: d.cardPlatPct }, crypto: { provPct: 0.5, platPct: d.cryptoPlatPct }, fxSpreadBps: d.fxSpreadBps, disputeFeeUSD: 1500 },
     reserve: { pct: d.reservePct, days: d.reserveDays }, captureMode: 'auto', threeDS: { mode: 'always', riskThreshold: 45, lowValueExemption: true }, non3ds: null,
     cryptoProvider: 'binance', providers: { card_acquirer: 'not_requested', binance: 'not_requested', coinbase: 'not_requested', soneri: 'not_requested' },
-    settlementHold: null, minPayout: 5000, dualControl: false,
+    settlementHold: null, minPayout: 5000, dualControl: false, receiving: { test: null, live: null },
     kyb: { submitted: false, business: {}, owners: [], checks: { registration: false, owners: false, website: false, sanctions: false, bank: false }, aml: { status: 'pending', at: null } },
   };
 }
@@ -60,6 +60,7 @@ const merchant = mid => { const m = store.get('merchants', mid); if (!m) throw n
 const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners.length > 0 && m.kyb.owners.every(o => o.idStatus === 'verified') && m.kyb.aml.status === 'clear';
 function liveReady(m) {
   if (!config.livePayments) return 'Live payments are switched off on this platform (LIVE_PAYMENTS=0).';
+  if (require('./chain').settings().platformMode !== 'live') return 'Base Mainnet is not switched on yet (Super Admin → Settings → MetaMask).';
   if (m.status !== 'approved') return 'Business verification is not approved.';
   if (!m.live_enabled) return 'Digital Hub has not activated live mode for this account.';
   return null;
@@ -70,12 +71,23 @@ function assertMode(m, mode) {
 }
 
 /* ---------------- controls & risk ---------------- */
+/* Payment methods. This phase runs MetaMask USDC on Base only; card processing and the Binance Pay / Coinbase /
+   sandbox crypto rails stay in the codebase but are switched off in chain settings (providers.*). */
+const METHODS = ['usdc', 'card', 'crypto'];
 function methodAvailable(m, mode, method) {
-  if (method === 'card') return m.perms.card && (mode === 'test' ? true : false); // live cards need a connected acquirer adapter
+  const chain = require('./chain'), prov = chain.settings().providers;
+  if (method === 'usdc') {
+    if (!prov.metamask_usdc || !m.perms.crypto) return false;
+    if (!chain.net(chain.networkFor(mode)).enabled) return false;
+    if (mode === 'live' && chain.settings().platformMode !== 'live') return false;
+    return !!require('./usdc').receivingWallet(m, mode);
+  }
+  if (method === 'card') return !!prov.card && m.perms.card && mode === 'test'; // live cards need a connected acquirer adapter
+  if (!(prov.binance || prov.coinbase || prov.sandbox_crypto)) return false;
   if (!m.perms.crypto) return false;
   if (mode === 'test') return cryptoOptions(m).length > 0;
-  const prov = P.CRYPTO[m.cryptoProvider];
-  return m.providers[m.cryptoProvider] === 'approved' && !!prov?.configured?.() && cryptoOptions(m).length > 0;
+  const rail = P.CRYPTO[m.cryptoProvider];
+  return m.providers[m.cryptoProvider] === 'approved' && !!rail?.configured?.() && cryptoOptions(m).length > 0;
 }
 function cryptoOptions(m) {
   const nets = (P.CRYPTO[m.cryptoProvider] || P.CRYPTO.sandbox).networks, enabled = platform().networksEnabled, out = [];
@@ -135,7 +147,9 @@ function publicPayment(p) {
     amount_refunded: p.refunded, net: p.net, fees: p.fees, customer: { name: p.customer?.name, email: p.customer?.email, country: p.customer?.country }, metadata: p.metadata || {},
     checkout_session: p.session_id, payment_link: p.link_id || null, decline_code: p.declineCode || null,
     card: p.card ? { brand: p.card.brand, last4: p.card.last4, country: p.card.country, three_d_secure: p.card.threeDS?.result || null } : null,
-    crypto: p.crypto ? { provider: p.crypto.provider, asset: p.crypto.asset, network: p.crypto.network, amount_due: p.crypto.quoteAmount, amount_received: p.crypto.received, confirmations: p.crypto.confirmations, confirmations_required: p.crypto.required } : null,
+    crypto: p.crypto ? { provider: p.crypto.provider, asset: p.crypto.asset, network: p.crypto.network, amount_due: p.crypto.quoteAmount, amount_received: p.crypto.received, confirmations: p.crypto.confirmations, confirmations_required: p.crypto.required,
+      ...(p.method === 'usdc' ? { chain_id: p.crypto.chain_id, token: p.crypto.token, payer: p.crypto.payer, recipient: p.crypto.recipient, amount_due_units: p.crypto.amountUnits, amount_received_units: p.crypto.receivedUnits,
+        excess: p.crypto.excess || 0, transactions: p.crypto.txs.map(t => ({ hash: t.hash, status: t.status, block: t.blockNumber || null, confirmations: t.confirmations || 0, amount_units: t.valueUnits || null, reason: t.reason || null })) } : {}) } : null,
     created: ts(p.created_at) };
 }
 const publicRefund = r => ({ id: r.id, object: 'refund', livemode: r.mode === 'live', status: r.status, payment: r.payment_id, amount: r.amount, currency: r.currency, reason: r.reason || null, created: ts(r.created_at) });
@@ -150,9 +164,10 @@ function createSession(m, mode, input, actor = 'api') {
   if (amount > 100000000) throw bad('amount is too large.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   for (const k of ['success_url', 'cancel_url']) if (input[k] && !U.isUrl(input[k])) throw bad(`${k} must be an http(s) URL.`, 'url_invalid');
-  let methods = [].concat(input.payment_methods || input.methods || ['card', 'crypto']).map(String).filter(x => ['card', 'crypto'].includes(x));
+  let methods = [].concat(input.payment_methods || input.methods || ['usdc']).map(String).filter(x => METHODS.includes(x));
   methods = methods.filter(x => methodAvailable(m, mode, x));
-  if (!methods.length) throw bad('No requested payment method is available for this account in this mode.', 'no_payment_method');
+  if (!methods.length) throw bad(require('./usdc').receivingWallet(m, mode) || mode === 'live' ? 'No requested payment method is available for this account in this mode. This platform accepts USDC via MetaMask (payment_methods: ["usdc"]).' : 'USDC checkout needs a verified receiving wallet: Dashboard → Receiving wallet → verify with MetaMask.', 'no_payment_method');
+  if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC checkout is priced in USD (1 USDC = 1 USD, no conversion). Use currency USD.', 'currency_unsupported');
   const block = controlCheck(m, mode, amount, currency, null); if (block) throw bad(block, 'limit_exceeded');
   const metadata = {}; for (const [k, v] of Object.entries(input.metadata || {}).slice(0, 20)) metadata[U.str(k, 40)] = U.str(v, 500);
   const s = store.put('checkout_sessions', { id: 'cs_' + rid(28), merchant_id: m.id, mode, status: 'open', amount, currency, description: U.str(input.description || 'Payment', 200), methods,
@@ -168,8 +183,9 @@ function createLink(m, mode, input, actor) {
   if (!Number.isInteger(amount) || amount < 50) throw bad('amount must be an integer in minor units, at least 50.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   const description = U.str(input.description, 200); if (!description) throw bad('description is required.');
-  const methods = [].concat(input.payment_methods || ['card', 'crypto']).filter(x => ['card', 'crypto'].includes(x));
+  const methods = [].concat(input.payment_methods || ['usdc']).filter(x => METHODS.includes(x));
   if (!methods.length) throw bad('Choose at least one payment method.');
+  if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC payment links are priced in USD.', 'currency_unsupported');
   const days = Number(input.expires_in_days || 0);
   const l = store.put('links', { id: id('plink'), merchant_id: m.id, mode, status: 'active', k: rid(24, 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'), amount, currency, description, methods,
     reusable: !!input.reusable, expires_at: days > 0 ? now() + days * DAY : null, payments: [] });
@@ -189,7 +205,7 @@ const addEvent = (p, status, note = '') => p.events.push({ at: now(), status, no
 function sessionPayable(s) {
   if (s.status !== 'open') throw new HttpError(409, 'session_closed', s.status === 'complete' ? 'This checkout is already paid.' : 'This checkout has expired.');
   if (now() > s.expires_at) throw new HttpError(409, 'session_expired', 'This checkout has expired.');
-  if (s.payment_id) { const p = store.get('payments', s.payment_id); if (p && ['authorized', 'captured', 'confirming', 'awaiting_payment', 'requires_action'].includes(p.status)) throw new HttpError(409, 'payment_in_progress', 'A payment for this checkout is already in progress.'); }
+  if (s.payment_id) { const p = store.get('payments', s.payment_id); if (p && ['authorized', 'captured', 'confirming', 'awaiting_payment', 'requires_action', ...(p.method === 'usdc' ? ['underpaid'] : [])].includes(p.status)) throw new HttpError(409, 'payment_in_progress', 'A payment for this checkout is already in progress.'); }
 }
 function cardPay(s, input) {
   return store.tx(() => {
@@ -236,6 +252,10 @@ function complete3DS(p, code) {
     if (p.status !== 'requires_action') throw bad('No authentication pending.');
     const m = merchant(p.merchant_id), s = store.get('checkout_sessions', p.session_id), number = U.unseal(p.card.pendingNumber);
     delete p.card.pendingNumber; p.card.threeDS.flow = 'challenge';
+    if (String(code) === 'cancel') {
+      p.status = 'canceled'; p.card.threeDS.result = 'canceled'; addEvent(p, 'canceled', 'Customer canceled 3DS authentication');
+      store.put('payments', p); emit(m.id, p.mode, 'payment.canceled', publicPayment(p)); return p;
+    }
     if (String(code) !== '123456') { p.card.threeDS.result = 'failed'; return authorize(p, m, s, number, 'failed'); }
     Object.assign(p.card.threeDS, { result: 'authenticated', liability: 'issuer' }); addEvent(p, 'authenticated', '3DS challenge completed');
     return authorize(p, m, s, number, 'ok');
@@ -283,6 +303,7 @@ function cancel(p, actor) {
 }
 function completeSession(s, p) {
   if (!s || s.status !== 'open') return;
+  if (s.payment_id && s.payment_id !== p.id) { const prev = store.get('payments', s.payment_id); if (prev && PAID.includes(prev.status)) return; }
   s.status = 'complete'; s.payment_status = 'paid'; s.payment_id = p.id; store.put('checkout_sessions', s);
   if (s.link_id) { const l = store.get('links', s.link_id); if (l) { l.payments.push(p.id); if (!l.reusable) l.status = 'completed'; store.put('links', l); } }
   emit(s.merchant_id, s.mode, 'checkout.session.completed', publicSession(s));
@@ -618,8 +639,8 @@ function reconChecks(mode) {
   for (const p of pays) {
     if (p.method === 'card' && !p.settled && p.rcvRemaining) rcv[p.currency] = (rcv[p.currency] || 0) + p.rcvRemaining;
     if (p.method === 'card' && !p.settled && p.pendingRemaining) pend[p.currency] = (pend[p.currency] || 0) - p.pendingRemaining;
-    if (p.crypto && ['confirming', 'underpaid'].includes(p.status)) susp[p.crypto.asset] = (susp[p.crypto.asset] || 0) - p.crypto.received;
-    if (p.crypto?.excess) over[p.crypto.asset] = (over[p.crypto.asset] || 0) - p.crypto.excess;
+    if (p.method === 'crypto' && ['confirming', 'underpaid'].includes(p.status)) susp[p.crypto.asset] = (susp[p.crypto.asset] || 0) - p.crypto.received;
+    if (p.crypto?.excess) over[p.crypto.asset] = (over[p.crypto.asset] || 0) - (p.crypto.excess - (p.crypto.excessRefunded || 0));
   }
   out.push({ name: 'Acquirer receivable = unsettled captures', ok: eq(L.sumAccount(mode, ACCT.ACQ_RCV), rcv), detail: 'Money owed by the acquirer matches captured, unsettled card payments.' });
   out.push({ name: 'Merchant pending = unsettled net', ok: eq(L.sumAccount(mode, ACCT.M_PENDING), pend), detail: 'Pending balances equal net of unsettled captures.' });
@@ -629,10 +650,10 @@ function reconChecks(mode) {
   out.push({ name: 'Payout holds = payouts in flight', ok: eq(L.sumAccount(mode, ACCT.M_HOLD), hold), detail: 'Held funds match payouts awaiting approval or execution.' });
   const neg = store.list('merchants', {}, { limit: 10000 }).flatMap(m => Object.entries(L.merchantBalances(m.id, mode)).filter(([, b]) => b.available < 0).map(([c]) => `${m.name} ${c}`));
   out.push({ name: 'No negative available balances', ok: true, warn: neg.length > 0, detail: neg.length ? 'Negative: ' + neg.join(', ') : 'All available balances are zero or positive.' });
-  return out;
+  return [...out, ...require('./usdc').reconChecks(mode)];
 }
 
-module.exports = { PAID, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, merchant, kybReady, liveReady, assertMode, methodAvailable, cryptoOptions,
+module.exports = { METHODS, sessionPayable, newPayment, addEvent, completeSession, customerFrom, PAID, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, merchant, kybReady, liveReady, assertMode, methodAvailable, cryptoOptions,
   controlCheck, non3dsAuthorized, feeQuote, publicSession, publicPayment, publicRefund, publicLink, publicPayout, createSession, createLink, linkActive, cardPay, complete3DS, capture, cancel,
   cryptoStart, cryptoDetected, cryptoTick, cryptoExpire, acceptPartial, providerPaid, maxRefundable, refund, openDispute, resolveDispute, payoutQuote, requestPayout, approvePayout,
   completePayout, rejectPayout, adjust, idempotent, runSettlement, runExpiry, runSandboxConfirmations, runDeliveries, assertWebhookTarget, reconChecks, STABLE, FIAT };

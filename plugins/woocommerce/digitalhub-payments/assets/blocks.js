@@ -3,7 +3,7 @@
   var settings = window.wc.wcSettings.getSetting('digitalhub_data', {});
   var decode = window.wp.htmlEntities.decodeEntities;
   var el = window.wp.element.createElement;
-  var label = decode(settings.title || 'Card or USDT / USDC');
+  var label = decode(settings.title || 'USDC (MetaMask)');
   var Content = function () { return el('div', null, decode(settings.description || '')); };
   window.wc.wcBlocksRegistry.registerPaymentMethod({
     name: 'digitalhub',

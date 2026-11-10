@@ -7,6 +7,8 @@ const config = require('./config');
 const U = require('./util');
 const core = require('./core');
 const store = require('./db');
+const usdc = require('./usdc');
+const chain = require('./chain');
 const { HttpError } = U;
 
 const routes = [];
@@ -23,9 +25,12 @@ require('./routes/checkout').routes(route);
 
 const PUBLIC = path.join(config.ROOT, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
+/* MetaMask Connect (@metamask/connect-evm, loaded from jsDelivr only when no MetaMask extension is found) needs the
+   MetaMask relay/analytics hosts. Extra hosts can be appended with METAMASK_CONNECT_CSP. */
+const MM_CONNECT = "https://*.metamask.io wss://*.metamask.io " + String(process.env.METAMASK_CONNECT_CSP || '').trim();
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-  'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Content-Security-Policy': `default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.metamask.io; connect-src 'self' https://cdn.jsdelivr.net ${MM_CONNECT}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.replace(/\s+;/g, ';'),
+  'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
   ...(config.secureCookies ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
 
@@ -73,8 +78,24 @@ const errorResult = (e, headers = {}) => {
   return { status, body: JSON.stringify({ error: { type: e.type || 'api_error', code: e.code || 'internal_error', message } }), headers: { ...JSON_TYPE, ...headers } };
 };
 
+/* API logs: every /v1 call, inbound provider hook and customer-checkout write (status polls are skipped). */
+const LOGGED = /^\/(v1|hooks)\//;
+function logApi(ctx, status, ms, err) {
+  if (!LOGGED.test(ctx.path) && !(ctx.path.startsWith('/c-api/') && ctx.method !== 'GET')) return;
+  try {
+    let mid = ctx.auth?.merchant_id || null;
+    const cs = ctx.path.match(/^\/c-api\/sessions\/(cs_[A-Za-z0-9]+)/); if (!mid && cs) mid = store.get('checkout_sessions', cs[1])?.merchant_id || null;
+    store.put('api_logs', { id: U.id('log'), merchant_id: mid, mode: ctx.auth?.mode || null, status: status >= 400 ? 'error' : 'ok', kind: ctx.path.startsWith('/v1/') ? 'api' : ctx.path.startsWith('/hooks/') ? 'webhook_in' : 'checkout',
+      method: ctx.method, path: ctx.path.replace(/(cs|pay|re|stl)_[A-Za-z0-9]+/g, '$1_…'), full_path: ctx.path, code: status, ms, ip: ctx.ip, key: ctx.auth?.key || null,
+      idempotency_key: U.str(ctx.headers['idempotency-key'], 80) || null, error: err || null, ua: U.str(ctx.headers['user-agent'], 120) });
+  } catch (e) { console.error('[api-log]', e.message); }
+}
 async function runRoute(req, match, ctx, pathname, cookiesOut) {
-  const { extraHeaders } = ctx;
+  const { extraHeaders } = ctx, t0 = Date.now();
+  const done = r => { logApi(ctx, r.status || 200, Date.now() - t0, r.status >= 400 ? (() => { try { return JSON.parse(r.body).error?.code; } catch { return null; } })() : null); return r; };
+  return done(await runRouteInner(req, match, ctx, pathname, cookiesOut, extraHeaders));
+}
+async function runRouteInner(req, match, ctx, pathname, cookiesOut, extraHeaders) {
   try {
     if (/^\/(auth|m-api|a-api)\//.test(pathname) && req.method !== 'GET' && req.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
     const out = await match.handler(ctx);
@@ -144,30 +165,42 @@ const server = http.createServer(handler);
 /* Serverless has no timers between requests: background work runs after requests, at most every 20s
    per instance, plus the daily Vercel cron as a fallback when the site is idle. */
 let lastJobs = 0;
-const dbJobs = async () => { core.runSandboxConfirmations(); core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); };
-const runDbJobs = () => serial(() => store.requestTx(dbJobs));
+const dbJobs = async () => { core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); };
+/** Run a DB step safely: on Postgres every step takes the global lock + its own transaction; RPC calls happen between steps. */
+const db = fn => store.usePg ? serial(() => store.requestTx(async () => fn())) : Promise.resolve().then(fn);
+const runDbJobs = () => db(dbJobs);
+const monitor = () => usdc.tickAll({ db });
+function pruneLogs() { return db(() => { store.prune('api_logs', Date.now() - 30 * U.DAY); store.prune('sessions', Date.now() - 30 * U.DAY); }); }
 function scheduleJobs() {
   if (!config.serverless || Date.now() - lastJobs < 20000) return;
   lastJobs = Date.now();
-  const work = runDbJobs().then(() => core.runDeliveries()).catch(e => console.error('[job]', e.message));
+  const work = runDbJobs().then(() => monitor()).then(() => core.runDeliveries()).catch(e => console.error('[job]', e.message));
   require('@vercel/functions').waitUntil(work);
 }
 route('GET', '/api/cron', async ctx => {
   if (!config.cronSecret || !U.safeEqual(ctx.headers.authorization || '', 'Bearer ' + config.cronSecret)) throw new HttpError(401, 'unauthorized', 'Invalid cron secret.');
-  await store.requestTx(dbJobs);
+  await dbJobs();
+  await usdc.tickAll();
   await core.runDeliveries();
-  return { ok: true };
+  store.prune('api_logs', Date.now() - 30 * U.DAY);
+  return { ok: true, monitor: usdc.status };
 });
 
 async function start() {
   await ensureReady();
-  // Background jobs: webhook delivery, sandbox confirmations, expiries, settlement.
+  // Background jobs: chain monitor (RPC polling + WebSocket heads), webhook delivery, expiries, log retention.
   const safe = fn => () => Promise.resolve().then(fn).catch(e => console.error('[job]', e.message));
-  setInterval(safe(() => core.runDeliveries()), 4000);
-  setInterval(safe(() => core.runSandboxConfirmations()), 3000);
-  setInterval(safe(() => core.runExpiry()), 10000);
-  setInterval(safe(() => core.runSettlement('test')), 15000);
-  setInterval(safe(() => core.runSettlement('live')), 300000);
+  const timers = [
+    setInterval(safe(() => core.runDeliveries()), 4000),
+    setInterval(safe(monitor), +(process.env.CHAIN_POLL_MS || 6000)),
+    setInterval(safe(() => db(() => core.runExpiry())), 10000),
+    setInterval(safe(() => db(() => { core.runSettlement('test'); core.runSettlement('live'); })), 60000),
+    setInterval(safe(pruneLogs), 6 * 3600000),
+  ];
+  // New block on a WebSocket subscription → check that network right away (throttled to one tick per 2 s).
+  const lastHeadTick = {};
+  for (const key of Object.keys(chain.NETWORKS)) chain.subscribeHeads(key, k => { if (Date.now() - (lastHeadTick[k] || 0) < 2000) return; lastHeadTick[k] = Date.now(); safe(() => usdc.tick(k, { db }))(); });
+  server.on('close', () => { timers.forEach(clearInterval); chain.stopSockets(); });
   server.on('error', e => {
     if (e.code !== 'EADDRINUSE') throw e;
     console.error(`\n  Port ${config.port} is already in use, so this copy cannot start.`);

@@ -6,10 +6,12 @@ const store = require('../db');
 const L = require('../ledger');
 const U = require('../util');
 const core = require('../core');
+const usdc = require('../usdc');
+const C = require('../chain');
 const { HttpError, bad } = U;
 
 const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
-const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created',
+const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created', 'refund.succeeded', 'refund.updated',
   'crypto.payment.created', 'crypto.payment.detected', 'crypto.payment.underpaid', 'crypto.payment.expired', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.closed'];
 
 const rate = new Map();
@@ -30,6 +32,7 @@ function authenticate(ctx) {
   if (++r.n > 100) throw new HttpError(429, 'rate_limited', 'Too many requests. Slow down and retry.');
   rate.set(key.id, r);
   if (!key.last_used || Date.now() - key.last_used > 60000) { key.last_used = Date.now(); store.put('api_keys', key); }
+  ctx.auth = { merchant_id: m.id, key: key.prefix + '…' + key.last4, mode: key.mode };
   return { key, m, mode: key.mode };
 }
 function scope(a, s) {
@@ -52,23 +55,29 @@ function routes(r) {
   const get = (path, sc, fn) => r('GET', path, ctx => { const a = authenticate(ctx); scope(a, sc); return fn(ctx, a); });
   const actor = a => `api:${a.key.prefix}…${a.key.last4}`;
 
-  get('/v1/account', 'payments:read', (ctx, a) => ({ id: a.m.id, object: 'account', name: a.m.name, country: a.m.country, status: a.m.status, livemode: a.mode === 'live',
-    payment_methods: ['card', 'crypto'].filter(x => core.methodAvailable(a.m, a.mode, x)), crypto_options: core.cryptoOptions(a.m).map(([asset, network]) => ({ asset, network })) }));
+  get('/v1/account', 'payments:read', (ctx, a) => { const w = usdc.receivingWallet(a.m, a.mode), n = C.walletParams(C.networkFor(a.mode));
+    return { id: a.m.id, object: 'account', name: a.m.name, country: a.m.country, status: a.m.status, livemode: a.mode === 'live',
+      payment_methods: core.METHODS.filter(x => core.methodAvailable(a.m, a.mode, x)), usdc: { network: n.chainName, chain_id: n.chainId, token: n.usdc, receiving_wallet: w?.address || null, currency: 'USD' } }; });
 
   post('/v1/checkout/sessions', 'checkout:write', (ctx, a) => core.publicSession(core.createSession(a.m, a.mode, ctx.body, actor(a))));
-  get('/v1/checkout/sessions/:id', 'checkout:read', (ctx, a) => core.publicSession(owned('checkout_sessions', ctx.params.id, a)));
+  get('/v1/checkout/sessions/:id', 'checkout:read', async (ctx, a) => { const s = owned('checkout_sessions', ctx.params.id, a); if (s.payment_id) await usdc.refreshPayment(store.get('payments', s.payment_id)); return core.publicSession(store.get('checkout_sessions', s.id)); });
   get('/v1/checkout/sessions', 'payments:read', (ctx, a) => listOf(store.list('checkout_sessions', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicSession, lim(ctx.query)));
 
   get('/v1/payments', 'payments:read', (ctx, a) => listOf(store.list('payments', { merchant_id: a.m.id, mode: a.mode, ...(ctx.query.status ? { status: ctx.query.status } : {}) }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicPayment, lim(ctx.query)));
-  get('/v1/payments/:id', 'payments:read', (ctx, a) => core.publicPayment(owned('payments', ctx.params.id, a)));
+  get('/v1/payments/:id', 'payments:read', async (ctx, a) => core.publicPayment(await usdc.refreshPayment(owned('payments', ctx.params.id, a))));
   post('/v1/payments/:id/capture', 'payments:write', (ctx, a) => core.publicPayment(core.capture(owned('payments', ctx.params.id, a), actor(a))));
   post('/v1/payments/:id/cancel', 'payments:write', (ctx, a) => core.publicPayment(core.cancel(owned('payments', ctx.params.id, a), actor(a))));
 
-  post('/v1/refunds', 'refunds:write', (ctx, a) => {
-    const p = owned('payments', ctx.body.payment, a);
-    return core.publicRefund(core.refund(p, ctx.body.amount == null ? null : Number(ctx.body.amount), { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address, network: ctx.body.network }));
+  /** USDC refunds are non-custodial: this creates a refund request (status requires_action). The merchant sends the USDC
+      from the receiving wallet with MetaMask in the dashboard; the refund succeeds only when that transfer is verified on Base. */
+  post('/v1/refunds', 'refunds:write', async (ctx, a) => {
+    const p = owned('payments', ctx.body.payment, a), amount = ctx.body.amount == null ? null : Number(ctx.body.amount);
+    if (p.method === 'usdc') return usdc.publicRefund(await usdc.createRefund(p, amount, { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address || null }));
+    return core.publicRefund(core.refund(p, amount, { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address, network: ctx.body.network }));
   });
-  get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicRefund, lim(ctx.query)));
+  const anyRefund = r => r.network ? usdc.publicRefund(r) : core.publicRefund(r);
+  get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), anyRefund, lim(ctx.query)));
+  get('/v1/refunds/:id', 'payments:read', async (ctx, a) => anyRefund(await usdc.refreshRefund(owned('refunds', ctx.params.id, a))));
 
   get('/v1/balance', 'balance:read', (ctx, a) => ({ object: 'balance', livemode: a.mode === 'live', balances: Object.entries(L.merchantBalances(a.m.id, a.mode)).map(([currency, b]) => ({ currency, ...b })) }));
 

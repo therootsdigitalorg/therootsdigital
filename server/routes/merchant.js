@@ -9,6 +9,9 @@ const core = require('../core');
 const P = require('../providers');
 const auth = require('../auth');
 const api = require('./api');
+const usdc = require('../usdc');
+const C = require('../chain');
+const E = require('../evm');
 const { HttpError, bad, DAY } = U;
 
 const KEY_ALPHA = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -31,9 +34,9 @@ function onboarding(m) {
     { key: 'mfa', label: 'Two-factor authentication on the owner account', done: !!owner?.mfa_enabled, detail: 'Required for payouts and live keys.' },
     { key: 'api_key', label: 'Create a test API key', done: store.list('api_keys', { merchant_id: m.id, mode: 'test' }).some(k => k.type === 'secret'), detail: 'Developers → API keys.' },
     { key: 'webhook', label: 'Add a webhook endpoint', done: any('webhook_endpoints', {}), detail: 'Signed events to your server or plugin.' },
-    { key: 'test_payment', label: 'Complete a test payment', done: store.list('payments', { merchant_id: m.id, mode: 'test', status: core.PAID }, { limit: 1 }).length > 0, detail: 'Use a payment link or the API in test mode.' },
-    { key: 'crypto_provider', label: 'Crypto provider authorized (Binance Pay / Coinbase)', done: ['binance', 'coinbase'].some(p => m.providers[p] === 'approved'), detail: 'Request under Go live → Providers.' },
-    { key: 'destination', label: 'Verified payout destination', done: any('wallets', { status: 'verified' }) || any('banks', { status: 'verified' }), detail: 'Wallet or bank account approved by Digital Hub.' },
+    { key: 'wallet', label: 'Receiving wallet verified with MetaMask', done: !!usdc.receivingWallet(m, 'test'), detail: 'Receiving wallet → add your Base address and sign the ownership message.' },
+    { key: 'test_payment', label: 'Complete a Base Sepolia test payment', done: store.list('payments', { merchant_id: m.id, mode: 'test', status: core.PAID }, { limit: 1 }).length > 0, detail: 'Open a payment link and pay with test USDC from MetaMask (faucet.circle.com).' },
+    { key: 'wallet_live', label: 'Wallet approved by Digital Hub compliance', done: store.list('merchant_wallets', { merchant_id: m.id, status: 'approved' }, { limit: 1 }).length > 0, detail: 'Required before Base Mainnet payments.' },
     { key: 'live', label: 'Live mode activated', done: !core.liveReady(m), detail: core.liveReady(m) || 'Live payments enabled.' },
   ];
 }
@@ -52,13 +55,15 @@ function routes(r) {
     const ok = pays.filter(p => core.PAID.includes(p.status)), tried = pays.filter(p => !['created', 'awaiting_payment', 'requires_action'].includes(p.status));
     const usd = p => U.toUSD(p.method === 'card' ? p.amount : (p.creditedAmount ?? p.crypto?.received ?? 0), p.method === 'card' ? p.currency : p.crypto.asset);
     const series = []; const end = new Date(); end.setHours(23, 59, 59, 999);
-    for (let i = 13; i >= 0; i--) { const e = end.getTime() - i * DAY, s = e - DAY; const day = ok.filter(p => p.created_at > s && p.created_at <= e); series.push({ label: new Date(e).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), card: day.filter(p => p.method === 'card').reduce((t, p) => t + usd(p), 0), crypto: day.filter(p => p.method === 'crypto').reduce((t, p) => t + usd(p), 0) }); }
+    for (let i = 13; i >= 0; i--) { const e = end.getTime() - i * DAY, s = e - DAY; const day = ok.filter(p => p.created_at > s && p.created_at <= e); series.push({ label: new Date(e).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), card: day.filter(p => p.method === 'card').reduce((t, p) => t + usd(p), 0), crypto: day.filter(p => p.method !== 'card').reduce((t, p) => t + usd(p), 0) }); }
     const balances = L.merchantBalances(c.m.id, c.mode);
     const attention = [
       ...store.list('payments', { merchant_id: c.m.id, mode: c.mode, status: ['authorized', 'underpaid', 'overpaid', 'wrong_network'] }, { limit: 20 }).map(p => ({ payment: p.id, status: p.status, amount: p.amount, currency: p.currency })),
       ...store.list('disputes', { merchant_id: c.m.id, mode: c.mode, status: 'needs_response' }, { limit: 20 }).map(d => ({ payment: d.payment_id, status: 'dispute', amount: d.amount, currency: d.currency })),
     ];
-    return { gross_usd: ok.reduce((t, p) => t + usd(p), 0), count: ok.length, attempts: tried.length, fees_usd: ok.reduce((t, p) => t + (p.fees ? U.toUSD(p.fees.provider + p.fees.platform, p.method === 'card' ? p.currency : p.crypto.asset) : 0), 0),
+    const w = usdc.receivingWallet(c.m, c.mode);
+    return { direct: usdc.directBalances(c.m.id, c.mode), wallet: w ? usdc.publicWallet(w) : null, in_flight: pays.filter(p => usdc.ACTIVE.includes(p.status)).length,
+      network: C.walletParams(C.networkFor(c.mode)), gross_usd: ok.reduce((t, p) => t + usd(p), 0), count: ok.length, attempts: tried.length, fees_usd: ok.reduce((t, p) => t + (p.fees ? U.toUSD(p.fees.provider + p.fees.platform, p.method === 'card' ? p.currency : p.crypto.asset) : 0), 0),
       available_usd: Object.entries(balances).reduce((t, [cur, b]) => t + U.toUSD(b.available, cur), 0), balances, series, attention,
       recent: store.list('payments', { merchant_id: c.m.id, mode: c.mode }, { limit: 8 }).map(core.publicPayment), onboarding: onboarding(c.m), live_ready: core.liveReady(c.m) };
   });
@@ -71,21 +76,48 @@ function routes(r) {
     if (s) rows = rows.filter(p => [p.id, p.customer?.email, p.customer?.name, p.card?.last4, p.description, p.metadata && JSON.stringify(p.metadata)].some(x => String(x || '').toLowerCase().includes(s)));
     return { total: rows.length, data: rows.slice(+q.offset || 0, (+q.offset || 0) + 50).map(core.publicPayment) };
   });
-  M('GET', '/payments/:id', 'read', (ctx, c) => {
-    const p = mine('payments', ctx.params.id, c);
+  M('GET', '/payments/:id', 'read', async (ctx, c) => {
+    const p = await usdc.refreshPayment(mine('payments', ctx.params.id, c));
     return { payment: core.publicPayment(p), events: p.events, risk: p.risk || null, three_ds: p.card?.threeDS || null, crypto: p.crypto ? { ...p.crypto, tradeNo: undefined } : null,
-      ledger: L.entriesFor(p.id), refunds: store.list('refunds', { merchant_id: c.m.id }).filter(x => x.payment_id === p.id).map(core.publicRefund),
-      dispute: store.list('disputes', { merchant_id: c.m.id }).find(d => d.payment_id === p.id) || null, refundable: core.maxRefundable(p),
+      ledger: L.entriesFor(p.id), refunds: store.list('refunds', { merchant_id: c.m.id }).filter(x => x.payment_id === p.id).map(r => r.network ? usdc.publicRefund(r) : core.publicRefund(r)),
+      dispute: store.list('disputes', { merchant_id: c.m.id }).find(d => d.payment_id === p.id) || null, refundable: usdc.refundable(p),
+      explorer: p.crypto?.chain_id ? C.NETWORKS[p.crypto.network].explorer : null,
       webhooks: store.list('events', { merchant_id: c.m.id, mode: c.mode }, { limit: 300 }).filter(e => e.data.object.id === p.id).map(e => ({ id: e.id, type: e.type, created: e.created_at })) };
   });
   M('POST', '/payments/:id/capture', 'payments', (ctx, c) => core.publicPayment(core.capture(mine('payments', ctx.params.id, c), c.actor)));
   M('POST', '/payments/:id/cancel', 'payments', (ctx, c) => core.publicPayment(core.cancel(mine('payments', ctx.params.id, c), c.actor)));
   M('POST', '/payments/:id/refund', 'refunds', async (ctx, c) => {
     const p = mine('payments', ctx.params.id, c), b = ctx.body;
-    const out = await core.idempotent(c.m.id, c.mode, b.idempotency_key, U.sha256(JSON.stringify([p.id, b.amount, b.address, b.network])), () => ({ status: 200, body: core.publicRefund(core.refund(p, b.amount == null ? null : Number(b.amount), { actor: c.actor, reason: b.reason, address: U.str(b.address, 120), network: b.network })) }));
+    const out = await core.idempotent(c.m.id, c.mode, b.idempotency_key, U.sha256(JSON.stringify([p.id, b.amount, b.address, b.network])), async () => ({ status: 200, body: p.method === 'usdc'
+      ? usdc.publicRefund(await usdc.createRefund(p, b.amount == null || b.amount === '' ? null : Number(b.amount), { actor: c.actor, reason: b.reason, address: U.str(b.address, 120) || null }))
+      : core.publicRefund(core.refund(p, b.amount == null ? null : Number(b.amount), { actor: c.actor, reason: b.reason, address: U.str(b.address, 120), network: b.network })) }));
     return { ...out.body, replayed: !!out.replay };
   });
-  M('POST', '/payments/:id/accept-partial', 'payments', (ctx, c) => core.publicPayment(core.acceptPartial(mine('payments', ctx.params.id, c), c.actor)));
+  M('POST', '/payments/:id/accept-partial', 'payments', (ctx, c) => core.publicPayment(usdc.acceptPartial(mine('payments', ctx.params.id, c), c.actor)));
+  M('POST', '/payments/:id/check', 'read', async (ctx, c) => core.publicPayment(await usdc.refreshPayment(mine('payments', ctx.params.id, c), { force: true })));
+
+  /* ---- USDC refunds (sent by the merchant from the receiving wallet with MetaMask) ---- */
+  const refundOut = r => ({ ...usdc.publicRefund(r), events: r.events || [], action: r.status === 'requires_action' ? usdc.refundAction(r) : null, last_error: r.last_error || null, explorer: r.tx?.hash ? C.explorerTx(r.network, r.tx.hash) : null });
+  M('GET', '/refunds', 'read', (ctx, c) => store.list('refunds', { merchant_id: c.m.id, mode: c.mode }, { limit: 300 }).map(r => r.network ? refundOut(r) : core.publicRefund(r)));
+  M('GET', '/refunds/:id', 'read', async (ctx, c) => refundOut(await usdc.refreshRefund(mine('refunds', ctx.params.id, c))));
+  M('POST', '/refunds/:id/tx', 'refunds', async (ctx, c) => refundOut(await usdc.submitRefundTx(mine('refunds', ctx.params.id, c), String(ctx.body.hash || ''), c.actor)));
+  M('POST', '/refunds/:id/cancel', 'refunds', (ctx, c) => refundOut(usdc.cancelRefund(mine('refunds', ctx.params.id, c), c.actor)));
+
+  /* ---- receiving wallets (shared by test and live; ownership proven by signature) ---- */
+  M('GET', '/wallets', 'read', (ctx, c) => ({ wallets: store.list('merchant_wallets', { merchant_id: c.m.id }, { limit: 100 }).filter(w => w.status !== 'disabled').map(usdc.publicWallet), receiving: c.m.receiving || {},
+    chain: C.walletParams(C.networkFor(c.mode)), mode: c.mode }));
+  M('POST', '/wallets', 'settings', (ctx, c) => usdc.publicWallet(usdc.addWallet(c.m, ctx.body, c.actor)));
+  M('POST', '/wallets/:id/challenge', 'settings', (ctx, c) => usdc.walletChallenge(c.m, mine('merchant_wallets', ctx.params.id, c, false), c.mode, c.actor));
+  M('POST', '/wallets/:id/verify', 'settings', (ctx, c) => usdc.publicWallet(usdc.verifyWalletSignature(c.m, mine('merchant_wallets', ctx.params.id, c, false), String(ctx.body.signature || ''), { actor: c.actor, ip: ctx.ip })));
+  M('POST', '/wallets/:id/receiving', 'settings', (ctx, c) => { usdc.setReceiving(c.m, mine('merchant_wallets', ctx.params.id, c, false), ctx.body.mode === 'live' ? 'live' : 'test', c.actor); return { ok: true }; });
+  M('DELETE', '/wallets/:id', 'settings', (ctx, c) => usdc.publicWallet(usdc.removeWallet(c.m, mine('merchant_wallets', ctx.params.id, c, false), c.actor)));
+
+  /* ---- platform fee statements (merchant pays Digital Hub's fee from MetaMask; verified on-chain) ---- */
+  M('GET', '/settlements', 'read', (ctx, c) => { const fw = C.settings().feeWallet, key = C.networkFor(c.mode);
+    return { fee_wallet: fw, chain: C.walletParams(key), fees_due: usdc.feeDue(c.m.id, c.mode),
+      statements: store.list('settlements', { merchant_id: c.m.id, mode: c.mode }, { limit: 200 }).map(s => ({ ...s, explorer: s.tx?.hash ? C.explorerTx(key, s.tx.hash) : null,
+        action: s.status === 'open' && fw ? { token: C.net(key).usdc, to: fw, amount_units: s.amountUnits, data: E.transferData(fw, s.amountUnits) } : null })) }; });
+  M('POST', '/settlements/:id/tx', 'payouts', async (ctx, c) => usdc.submitSettlementTx(mine('settlements', ctx.params.id, c), String(ctx.body.hash || ''), c.actor));
   M('POST', '/payments/:id/simulate-dispute', 'payments', (ctx, c) => core.openDispute(mine('payments', ctx.params.id, c), U.str(ctx.body.reason, 40) || 'fraudulent', c.actor));
   M('POST', '/disputes/:id/evidence', 'payments', (ctx, c) => { const d = mine('disputes', ctx.params.id, c); const t = U.str(ctx.body.text, 4000); if (t.length < 20) throw bad('Describe your evidence (20+ characters).'); if (d.status !== 'needs_response') throw bad('Evidence already submitted.'); Object.assign(d, { status: 'under_review', evidence: t, evidence_at: Date.now() }); store.put('disputes', d); core.audit(c.actor, 'dispute.evidence', d.id, '', c.m.id); return d; });
 
@@ -95,7 +127,7 @@ function routes(r) {
   M('POST', '/links/:id/status', 'payments', (ctx, c) => { const l = mine('links', ctx.params.id, c); l.status = ctx.body.active ? 'active' : 'deactivated'; store.put('links', l); core.audit(c.actor, 'payment_link.' + l.status, l.id, '', c.m.id); return core.publicLink(l); });
 
   /* ---- balances & payouts ---- */
-  M('GET', '/balances', 'read', (ctx, c) => ({ balances: L.merchantBalances(c.m.id, c.mode), payouts: store.list('payouts', { merchant_id: c.m.id, mode: c.mode }, { limit: 100 }).map(po => ({ ...core.publicPayout(po), events: po.events, reasons: po.reasons })), hold: c.m.settlementHold, min_payout: c.m.minPayout }));
+  M('GET', '/balances', 'read', (ctx, c) => ({ direct: usdc.directBalances(c.m.id, c.mode), balances: L.merchantBalances(c.m.id, c.mode), payouts: store.list('payouts', { merchant_id: c.m.id, mode: c.mode }, { limit: 100 }).map(po => ({ ...core.publicPayout(po), events: po.events, reasons: po.reasons })), hold: c.m.settlementHold, min_payout: c.m.minPayout }));
   M('POST', '/payouts/quote', 'payouts', (ctx, c) => { const q = core.payoutQuote(c.m, c.mode, String(ctx.body.currency || '').toUpperCase(), Number(ctx.body.amount), ctx.body.destination); return { ...q, dest: undefined, available: L.balance(c.m.id, c.mode, L.ACCT.M_AVAIL, q.sourceCur) }; });
   M('POST', '/payouts', 'payouts', async (ctx, c) => {
     if (c.mode === 'live' && !c.user.mfa_enabled) throw new HttpError(403, 'mfa_required', 'Enable two-factor authentication before requesting live payouts.');
@@ -208,7 +240,7 @@ function routes(r) {
   M('DELETE', '/team/:id', 'team', (ctx, c) => { const u = store.get('users', ctx.params.id); if (!u || u.merchant_id !== c.m.id || u.role === 'owner') throw bad('Cannot remove this user.'); u.status = 'disabled'; store.put('users', u); core.audit(c.actor, 'team.remove', u.email, '', c.m.id); return { ok: true }; });
 
   /* ---- sandbox helpers ---- */
-  M('POST', '/test/sample-payments', 'payments', async (ctx, c) => { if (c.mode !== 'test') throw bad('Only in test mode.'); return { created: await require('../seed').samplePayments(c.m, 6) }; });
+  /* No simulated payments: test mode is the real Base Sepolia testnet. */
 }
 
 module.exports = { routes, issueKey, publicKey, ensurePublishable, onboarding };

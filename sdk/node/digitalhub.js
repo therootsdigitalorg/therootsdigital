@@ -16,7 +16,7 @@ class DigitalHub {
     const r = (m, p, b, o) => this.request(m, p, b, o);
     this.checkout = { create: (b, o) => r('POST', '/checkout/sessions', b, o), retrieve: id => r('GET', `/checkout/sessions/${id}`), list: q => r('GET', '/checkout/sessions', null, { query: q }) };
     this.payments = { retrieve: id => r('GET', `/payments/${id}`), list: q => r('GET', '/payments', null, { query: q }), capture: (id, o) => r('POST', `/payments/${id}/capture`, {}, o), cancel: (id, o) => r('POST', `/payments/${id}/cancel`, {}, o) };
-    this.refunds = { create: (b, o) => r('POST', '/refunds', b, o), list: q => r('GET', '/refunds', null, { query: q }) };
+    this.refunds = { create: (b, o) => r('POST', '/refunds', b, o), retrieve: id => r('GET', `/refunds/${id}`), list: q => r('GET', '/refunds', null, { query: q }) };
     this.paymentLinks = { create: (b, o) => r('POST', '/payment_links', b, o), list: q => r('GET', '/payment_links', null, { query: q }), deactivate: id => r('POST', `/payment_links/${id}/deactivate`, {}) };
     this.balance = { retrieve: () => r('GET', '/balance') };
     this.payouts = { create: (b, o) => r('POST', '/payouts', b, o), list: q => r('GET', '/payouts', null, { query: q }) };

@@ -7,7 +7,7 @@ const path = require('node:path');
 const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const config = require('./config');
 
-const SCHEMA = 'digitalhub', SCHEMA_VERSION = 1, TIMEOUT_MS = 30000;
+const SCHEMA = 'digitalhub', SCHEMA_VERSION = 2, TIMEOUT_MS = 30000;
 
 function sslFor(u) {
   if (config.databaseCa) return { ca: config.databaseCa };
@@ -39,6 +39,7 @@ function open(tables, uniqueK) {
   ensureSchema(call, tables, uniqueK);
   return {
     exec: sql => { call(qualify(sql)); },
+    supabaseProfile: (id, email) => call('SELECT id::text AS id, email, role FROM public.profiles WHERE id::text = $1 AND lower(email) = lower($2) LIMIT 1', [id, email]).rows[0],
     prepare: sql => { const q = numbered(sql); return {
       get: (...p) => call(q, p).rows[0],
       all: (...p) => call(q, p).rows,

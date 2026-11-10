@@ -79,6 +79,45 @@ function throttle(key) {
   return { fail() { a.n++; if (a.n >= 5) { a.until = Date.now() + 15 * 60000; a.n = 0; } attempts.set(key, a); }, ok() { attempts.delete(key); } };
 }
 
+async function supabaseAdmin(email, password) {
+  if (!config.supabaseUrl || !config.supabaseAnonKey) return null;
+  let response;
+  try {
+    response = await fetch(`${config.supabaseUrl}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: config.supabaseAnonKey, 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (e) {
+    console.error('[auth] Supabase Auth request failed:', e);
+    throw new HttpError(503, 'supabase_auth_unavailable', 'Could not connect to Supabase Auth.');
+  }
+  if (response.status === 400 || response.status === 401) return null;
+  if (response.status === 429) throw new HttpError(429, 'too_many_attempts', 'Too many sign-in attempts. Try again in a few minutes.');
+  if (!response.ok) throw new HttpError(503, 'supabase_auth_unavailable', 'Could not verify credentials with Supabase Auth.');
+
+  const authData = await response.json();
+  if (!authData.user?.id || String(authData.user.email || '').toLowerCase() !== email) return null;
+  let profile;
+  try { profile = store.supabaseProfile(authData.user.id, email); }
+  catch (e) {
+    console.error('[auth] Supabase profile lookup failed:', e);
+    throw new HttpError(503, 'supabase_profile_unavailable', 'Could not verify the admin role in Supabase public.profiles.');
+  }
+  if (profile?.role !== 'admin') return null;
+
+  let user = store.byKey('users', email);
+  if (user && user.kind !== 'staff') throw new HttpError(409, 'account_type_conflict', 'This email is already linked to a merchant account. Use a separate email for the admin account.');
+  if (user && user.status !== 'active') return null;
+  if (!user) {
+    user = createUser({ email, name: email, password: U.rid(48), kind: 'staff', role: 'super_admin' });
+  } else if (user.role !== 'super_admin') {
+    user.role = 'super_admin';
+    store.put('users', user);
+  }
+  return user;
+}
+
 function routes(r) {
   r('POST', '/auth/signup', ctx => {
     const b = ctx.body, t = throttle('signup:' + ctx.ip);
@@ -94,10 +133,13 @@ function routes(r) {
     t.ok(); startSession(ctx, user, true);
     return { user: publicUser(user) };
   });
-  r('POST', '/auth/login', ctx => {
+  r('POST', '/auth/login', async ctx => {
     const email = String(ctx.body.email || '').trim().toLowerCase(), t = throttle('login:' + ctx.ip + ':' + email);
-    const u = store.byKey('users', email);
-    if (!u || u.status !== 'active' || !U.verifyPassword(String(ctx.body.password || ''), u.password_hash)) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
+    let u = store.byKey('users', email);
+    if (!u || u.status !== 'active' || !U.verifyPassword(String(ctx.body.password || ''), u.password_hash)) {
+      u = await supabaseAdmin(email, String(ctx.body.password || ''));
+      if (!u) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
+    }
     t.ok(); startSession(ctx, u, !u.mfa_enabled);
     u.last_login = Date.now(); store.put('users', u);
     core.audit(u.email, 'auth.login', u.id, ctx.ip, u.merchant_id);

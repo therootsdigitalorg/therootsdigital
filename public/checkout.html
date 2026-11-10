@@ -11,16 +11,39 @@
 <style>
   .co-page{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:28px 16px 40px;gap:14px}
   .co{width:min(480px,100%)}
-  .co-foot{font-size:.75rem;color:var(--faint);text-align:center}
-  .tc{display:flex;flex-direction:column;gap:6px}
+  .co-foot{font-size:.75rem;color:var(--faint);text-align:center;max-width:480px}
+  .net-chip{display:inline-flex;align-items:center;gap:6px;font-size:.72rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line-strong);border-radius:999px;padding:3px 10px;color:var(--muted)}
+  .net-chip i{width:8px;height:8px;border-radius:50%;background:#0052FF}
+  .mm-btn{width:100%;padding:12px;font-size:.95rem}
+  .mm-mark{width:20px;height:20px;border-radius:5px;background:linear-gradient(135deg,#F6851B,#E2761B);display:inline-block}
+  .acct{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)}
+  .acct .mono{font-size:.82rem}
+  .steps-v{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+  .steps-v li{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;align-items:start;font-size:.86rem;color:var(--muted)}
+  .steps-v li b{color:var(--fg)}
+  .steps-v .dot{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:.7rem;font-weight:800;background:var(--line);color:var(--muted)}
+  .steps-v .dot.on{background:var(--accent);color:var(--accent-ink)} .steps-v .dot.done{background:var(--ok-soft);color:var(--ok)}
+  .txrow{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:.8rem;border-top:1px solid var(--line);padding-top:8px}
+  .thank-you{display:grid;justify-items:center;gap:12px;text-align:center;padding:8px 0}
+  .thank-you-mark{width:64px;height:64px;display:grid;place-items:center;border-radius:50%;background:var(--ok-soft);color:var(--ok);font-size:2rem;font-weight:800;animation:dh-pop .55s cubic-bezier(.2,.8,.2,1) both}
+  .thank-you-mark span{animation:dh-check .35s .2s ease-out both}
+  .thank-you-details{width:100%;margin:8px 0;padding:4px 14px;border:1px solid var(--line);border-radius:var(--r-md);text-align:left}
+  .thank-you-details>div{display:flex;justify-content:space-between;gap:14px;padding:10px 0;border-bottom:1px solid var(--line)}
+  .thank-you-details>div:last-child{border-bottom:0}
+  .thank-you-details span{color:var(--muted)}
+  .thank-you-details b{text-align:right;overflow-wrap:anywhere}
+  .thank-you-details .paid-status{text-transform:capitalize;color:var(--ok)}
+  @keyframes dh-pop{from{transform:scale(.55);opacity:0}to{transform:scale(1);opacity:1}}
+  @keyframes dh-check{from{transform:scale(.5);opacity:0}to{transform:scale(1);opacity:1}}
+  @media(prefers-reduced-motion:reduce){.thank-you-mark,.thank-you-mark span{animation:none}}
 </style>
 </head>
 <body>
 <div id="banner"></div>
 <div class="co-page"><div class="co" id="co"><div class="co-body"><div class="loading">Loading checkout…</div></div></div>
-  <div class="co-foot">Secured by Digital Hub · <span id="modeNote"></span></div></div>
+  <div class="co-foot">Secured by Digital Hub · USDC goes straight from your MetaMask wallet to the merchant · Digital Hub never asks for your seed phrase or private key · <span id="modeNote"></span></div></div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="/js/metamask.js"></script>
 <script src="/checkout.js"></script>
 </body>
 </html>

@@ -16,7 +16,7 @@ final class DigitalHub_Blocks_Integration extends AbstractPaymentMethodType
 
     public function is_active()
     {
-        return isset($this->settings['enabled']) && $this->settings['enabled'] === 'yes';
+        return isset($this->settings['enabled']) && $this->settings['enabled'] === 'yes' && function_exists('get_woocommerce_currency') && get_woocommerce_currency() === 'USD';
     }
 
     public function get_payment_method_script_handles()
@@ -34,7 +34,7 @@ final class DigitalHub_Blocks_Integration extends AbstractPaymentMethodType
     public function get_payment_method_data()
     {
         return [
-            'title'       => isset($this->settings['title']) ? $this->settings['title'] : 'Card or USDT / USDC',
+            'title'       => isset($this->settings['title']) ? $this->settings['title'] : 'USDC (MetaMask)',
             'description' => isset($this->settings['description']) ? $this->settings['description'] : '',
             'supports'    => ['products', 'refunds'],
         ];

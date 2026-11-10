@@ -1,6 +1,8 @@
 'use strict';
 /* Hosted checkout (customer-facing), payment-link redirects, inbound provider webhooks
-   and integration downloads. Checkout session IDs are unguessable capability tokens. */
+   and integration downloads. Checkout session IDs are unguessable capability tokens.
+   This phase: MetaMask USDC on Base. Card and legacy crypto endpoints remain but refuse work
+   because those methods are switched off (core.methodAvailable). */
 const fs = require('node:fs');
 const path = require('node:path');
 const config = require('../config');
@@ -10,24 +12,39 @@ const core = require('../core');
 const P = require('../providers');
 const { HttpError, bad } = U;
 
+const usdc = require('../usdc');
+const C = require('../chain');
+const E = require('../evm');
+
 function view(s) {
   const m = core.merchant(s.merchant_id), p = s.payment_id ? store.get('payments', s.payment_id) : null;
   const methods = s.methods.filter(x => core.methodAvailable(m, s.mode, x));
+  const key = C.networkFor(s.mode), w = usdc.receivingWallet(m, s.mode);
   return {
     id: s.id, mode: s.mode, status: s.status, amount: s.amount, currency: s.currency, description: s.description, merchant: { name: m.name, website: m.website, support_email: m.support_email },
-    methods, cancel_url: s.cancel_url, success_url: s.success_url, customer_email: s.customer_email,
-    crypto: { provider: s.mode === 'test' ? `${P.CRYPTO[m.cryptoProvider].name} (sandbox)` : P.CRYPTO[m.cryptoProvider].name, options: core.cryptoOptions(m).map(([asset, network]) => ({ asset, network, label: P.NETWORKS[network].label, confirmations: P.NETWORKS[network].confirmations })),
-      quotes: Object.fromEntries(U.STABLE.map(a => [a, s.mode === 'live' ? s.amount : Math.ceil(s.amount / U.CURRENCIES[s.currency].fx * U.CURRENCIES[a].fx)])) },
-    test_cards: s.mode === 'test' ? Object.entries(P.TEST_CARDS).map(([number, c]) => ({ number, brand: c.brand, country: c.country, label: c.label })) : [],
+    methods, cancel_url: s.cancel_url, success_url: s.success_url, customer_email: s.customer_email, expires_at: s.expires_at,
+    usdc: methods.includes('usdc') ? { chain: C.walletParams(key), recipient: w.address, amount_units: E.centsToUnits(s.amount), confirmations: C.net(key).confirmations, finality: C.net(key).finality,
+      quote_minutes: C.net(key).quoteMinutes, explorer: C.NETWORKS[key].explorer } : null,
     payment: p ? paymentView(p) : null,
   };
 }
 function paymentView(p) {
-  return { id: p.id, status: p.status, method: p.method, amount: p.amount, currency: p.currency, decline: p.status === 'declined' ? p.events.at(-1).note : null,
-    card: p.card ? { brand: p.card.brand, last4: p.card.last4, three_ds: p.card.threeDS?.result || null } : null,
-    crypto: p.crypto ? { provider: p.crypto.provider, asset: p.crypto.asset, network: p.crypto.network, network_label: P.NETWORKS[p.crypto.network].label, address: p.crypto.address || null, checkout_url: p.crypto.checkoutUrl || null, qr: p.crypto.qrContent || null,
-      amount_due: p.crypto.quoteAmount, received: p.crypto.received, confirmations: p.crypto.confirmations, required: p.crypto.required, expires_at: p.crypto.expiresAt, excess: p.crypto.excess } : null };
+  const base = { id: p.id, status: p.status, method: p.method, amount: p.amount, currency: p.currency, created: Math.floor(p.created_at / 1000), decline: p.status === 'declined' ? p.events.at(-1).note : null,
+    card: p.card ? { brand: p.card.brand, last4: p.card.last4, three_ds: p.card.threeDS?.result || null } : null };
+  const c = p.crypto;
+  if (!c) return { ...base, crypto: null };
+  if (p.method !== 'usdc') return { ...base, crypto: { provider: c.provider, asset: c.asset, network: c.network, network_label: P.NETWORKS[c.network]?.label, address: c.address || null, amount_due: c.quoteAmount, received: c.received, confirmations: c.confirmations, required: c.required, expires_at: c.expiresAt, excess: c.excess } };
+  const pendingUnits = c.txs.filter(t => ['pending', 'confirming'].includes(t.status)).reduce((s, t) => s + BigInt(t.valueUnits || (t.status === 'pending' ? c.amountUnits : '0')), 0n);
+  const remaining = BigInt(c.amountUnits) - BigInt(c.receivedUnits || '0') - pendingUnits;
+  return { ...base, crypto: { provider: 'metamask', asset: 'USDC', network: c.network, network_label: C.NETWORKS[c.network].name, chain_id: c.chain_id, token: c.token, recipient: c.recipient, payer: c.payer,
+    amount_due: c.quoteAmount, amount_units: c.amountUnits, received: c.received, received_units: c.receivedUnits, remaining_units: (remaining > 0n ? remaining : 0n).toString(),
+    confirmations: c.confirmations, required: c.required, finality: c.finality, expires_at: c.expiresAt, excess: c.excess || 0, head: c.head || null,
+    txs: c.txs.map(t => ({ hash: t.hash, status: t.status, confirmations: t.confirmations || 0, block: t.blockNumber || null, amount_units: t.valueUnits || null, reason: t.reason || null, url: C.explorerTx(c.network, t.hash) })),
+    tx_request: remaining > 0n && ['awaiting_payment', 'underpaid', 'expired'].includes(p.status) ? { from: c.payer, to: c.token, value: '0x0', data: E.transferData(c.recipient, remaining.toString()) } : null } };
 }
+/* Small per-IP throttle on the customer-facing write endpoints (signature + RPC work). */
+const hits = new Map();
+function throttle(ip, limit = 40) { const t = Date.now(), h = hits.get(ip) || { n: 0, t }; if (t - h.t > 60000) { h.n = 0; h.t = t; } if (++h.n > limit) throw new HttpError(429, 'rate_limited', 'Too many requests. Wait a minute and try again.'); hits.set(ip, h); if (hits.size > 20000) hits.clear(); }
 function sessionFor(id) { const s = store.get('checkout_sessions', id); if (!s) throw new HttpError(404, 'not_found', 'Checkout not found.'); return s; }
 function paymentFor(id, sessionId) { const p = store.get('payments', id); if (!p || p.session_id !== sessionId) throw new HttpError(404, 'not_found', 'Payment not found.'); return p; }
 
@@ -47,20 +64,28 @@ function routes(r) {
     if (!l) throw new HttpError(404, 'not_found', 'This payment link does not exist.');
     if (!core.linkActive(l)) return { html: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Link unavailable</title><body style="font-family:system-ui;padding:40px;text-align:center"><h1>This payment link is no longer active</h1><p>Ask the merchant for a new link.</p>`, status: 410 };
     const m = core.merchant(l.merchant_id);
-    const s = core.createSession(m, l.mode, { amount: l.amount, currency: l.currency, description: l.description, payment_methods: l.methods, link_id: l.id }, 'payment_link');
+    let s;
+    try { s = core.createSession(m, l.mode, { amount: l.amount, currency: l.currency, description: l.description, payment_methods: l.methods, link_id: l.id }, 'payment_link'); }
+    catch (e) { if (!(e instanceof HttpError) || e.status >= 500) throw e; return { html: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment unavailable</title><body style="font-family:system-ui;padding:40px;text-align:center"><h1>This payment link cannot take payments right now</h1><p>The merchant has not finished setting up USDC payments. Please contact them.</p>`, status: 409 }; }
     return { redirect: `/pay/${s.id}` };
   });
 
-  r('GET', '/c-api/sessions/:id', ctx => view(sessionFor(ctx.params.id)));
+  r('GET', '/c-api/sessions/:id', async ctx => { const s = sessionFor(ctx.params.id); if (s.payment_id) await usdc.refreshPayment(store.get('payments', s.payment_id)); return view(store.get('checkout_sessions', s.id)); });
   r('POST', '/c-api/sessions/:id/card', ctx => paymentView(core.cardPay(sessionFor(ctx.params.id), ctx.body)));
   r('POST', '/c-api/sessions/:id/crypto', async ctx => paymentView(await core.cryptoStart(sessionFor(ctx.params.id), ctx.body)));
   r('POST', '/c-api/sessions/:id/payments/:pid/3ds', ctx => paymentView(core.complete3DS(paymentFor(ctx.params.pid, ctx.params.id), ctx.body.code)));
-  r('GET', '/c-api/sessions/:id/payments/:pid', ctx => paymentView(paymentFor(ctx.params.pid, ctx.params.id)));
-  r('POST', '/c-api/sessions/:id/payments/:pid/retry', ctx => {
+  r('GET', '/c-api/sessions/:id/payments/:pid', async ctx => paymentView(await usdc.refreshPayment(paymentFor(ctx.params.pid, ctx.params.id))));
+  /* ---- MetaMask USDC ---- */
+  r('POST', '/c-api/sessions/:id/usdc/challenge', ctx => { throttle(ctx.ip); return usdc.checkoutChallenge(sessionFor(ctx.params.id), ctx.body); });
+  r('POST', '/c-api/sessions/:id/usdc/start', async ctx => { throttle(ctx.ip); return paymentView(await usdc.startPayment(sessionFor(ctx.params.id), ctx.body, ctx.ip)); });
+  r('POST', '/c-api/sessions/:id/payments/:pid/tx', async ctx => { throttle(ctx.ip); return paymentView(await usdc.submitPaymentTx(paymentFor(ctx.params.pid, ctx.params.id), String(ctx.body.hash || ''))); });
+  r('POST', '/c-api/sessions/:id/payments/:pid/cancel', ctx => paymentView(usdc.cancelAwaiting(sessionFor(ctx.params.id), paymentFor(ctx.params.pid, ctx.params.id))));
+  r('POST', '/c-api/sessions/:id/payments/:pid/retry', ctx => store.tx(() => {
     const s = sessionFor(ctx.params.id), p = paymentFor(ctx.params.pid, s.id);
-    if (!['declined', 'expired', 'canceled'].includes(p.status)) throw bad('This payment cannot be retried.');
+    if (s.status !== 'open' || s.payment_id !== p.id) throw new HttpError(409, 'payment_changed', 'This checkout has moved on to another payment attempt.');
+    if (!['declined', 'expired', 'canceled', 'wrong_network'].includes(p.status)) throw bad('This payment cannot be retried.');
     s.payment_id = null; store.put('checkout_sessions', s); return { ok: true };
-  });
+  }));
   /** Sandbox wallet simulator — test mode only. Stands in for a verified provider event. */
   r('POST', '/c-api/sessions/:id/payments/:pid/simulate', ctx => {
     const p = paymentFor(ctx.params.pid, ctx.params.id);

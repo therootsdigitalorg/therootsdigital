@@ -42,7 +42,7 @@ function verifyTotp(secret, code) { code = String(code || '').replace(/\s/g, '')
 /* ---- money ---- */
 const CURRENCIES = {
   USD: { fx: 1, sym: '$' }, EUR: { fx: 0.92, sym: '€' }, GBP: { fx: 0.79, sym: '£' }, AED: { fx: 3.6725, sym: 'AED ' }, PKR: { fx: 281.5, sym: 'Rs ' },
-  USDT: { fx: 0.9998, crypto: true }, USDC: { fx: 1.0001, crypto: true },
+  USDT: { fx: 0.9998, crypto: true }, USDC: { fx: 1, crypto: true }, // USDC invoices are priced 1:1 in USD — no conversion
 };
 const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'], STABLE = ['USDT', 'USDC'];
 function convert(minor, from, to, spreadBps = 0) { if (from === to) return minor; return Math.round(minor / CURRENCIES[from].fx * CURRENCIES[to].fx * (1 - spreadBps / 10000)); }

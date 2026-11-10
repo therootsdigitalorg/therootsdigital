@@ -8,6 +8,9 @@ const ACCT = {
   M_PENDING: 'merchant_pending', M_AVAIL: 'merchant_available', M_RESERVE: 'merchant_reserve', M_HOLD: 'merchant_payout_hold',
   P_REV: 'platform_revenue', ACQ_RCV: 'acquirer_receivable', P_CASH: 'partner_cash', P_CUSTODY: 'partner_custody',
   C_SUSPENSE: 'customer_funds_suspense', C_OVERPAY: 'customer_overpayment', P_ADJ: 'platform_adjustments',
+  // Non-custodial USDC (funds land directly in the merchant's own wallet; Digital Hub books its fee as a receivable)
+  MW_RECEIPTS: 'merchant_wallet_receipts', C_UNAPPLIED: 'customer_unapplied_receipts', M_SALES: 'merchant_sales', M_REFUNDS: 'merchant_refunds',
+  P_FEE_RCV: 'platform_fee_receivable', P_TREASURY: 'platform_fee_treasury',
 };
 const MERCHANT_ACCTS = [ACCT.M_PENDING, ACCT.M_AVAIL, ACCT.M_RESERVE, ACCT.M_HOLD];
 

@@ -243,6 +243,10 @@ pre.code{background:var(--bg);border:1px solid var(--line);border-radius:8px;pad
   .onb li>:last-child{grid-column:2}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.mm-dot{width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,#F6851B,#E2761B);display:inline-block}
+.check-row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:nowrap}
+.check-row>div{min-width:0}
+.hash{font-family:var(--font-mono);font-size:.78rem;overflow-wrap:anywhere}
 
 /* ---------- full app additions (same tokens as the blueprint) ---------- */
 .auth-wrap{min-height:100vh;display:grid;place-items:center;padding:24px 16px}

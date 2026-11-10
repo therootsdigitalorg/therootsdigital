@@ -18,13 +18,14 @@ const lsGet = k => { try { return localStorage.getItem(k); } catch { return null
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 const COUNTRIES = { US: 'United States', GB: 'United Kingdom', DE: 'Germany', FR: 'France', AE: 'United Arab Emirates', PK: 'Pakistan', CA: 'Canada', AU: 'Australia', IN: 'India', SA: 'Saudi Arabia', NG: 'Nigeria', SG: 'Singapore' };
 const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'];
+const EXPLORER = { base_sepolia: 'https://sepolia.basescan.org', base: 'https://basescan.org' };
 
 const TONE = {
   ok: ['settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
   accent: ['captured'],
-  info: ['authorized', 'confirming', 'processing', 'awaiting_payment', 'requires_action', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test'],
-  warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid'],
-  danger: ['declined', 'failed', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no'],
+  info: ['authorized', 'confirming', 'processing', 'awaiting_payment', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test', 'verifying', 'sandbox', 'tx_submitted', 'tx_discovered', 'detected'],
+  warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid', 'requires_action', 'pending_signature', 'verified', 'attention', 'canceled', 'expired', 'reorg'],
+  danger: ['declined', 'failed', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no', 'not_found', 'tx_rejected', 'void', 'error'],
 };
 function badge(status, label) {
   const tone = Object.entries(TONE).find(([, v]) => v.includes(status))?.[0];
@@ -53,7 +54,7 @@ function barChart(series) {
     g += `<rect x="${x}" y="${yc}" width="${w}" height="${H - padB - yc}" fill="var(--accent)" rx="2"><title>${s.label}: card ${fmt(s.card, 'USD')}</title></rect>`;
     if (s.crypto) g += `<rect x="${x}" y="${yk}" width="${w}" height="${yc - yk}" fill="var(--warn)" rx="2"><title>${s.label}: crypto ${fmt(s.crypto, 'USD')}</title></rect>`;
     if (i % 2 === 0) g += `<text x="${x + w / 2}" y="${H - 8}" text-anchor="middle">${s.label}</text>`; });
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend"><span><i style="background:var(--accent)"></i>Card</span><span><i style="background:var(--warn)"></i>USDT / USDC</span><span>USD equivalent</span></div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend">${series.some(s => s.card) ? '<span><i style="background:var(--accent)"></i>Card (legacy)</span>' : ''}<span><i style="background:var(--warn)"></i>USDC (MetaMask)</span><span>1 USDC = 1 USD</span></div>`;
 }
 function balanceCards(bal) {
   const curs = Object.keys(bal || {}).sort((a, b) => (CRYPTO.includes(a) - CRYPTO.includes(b)) || a.localeCompare(b));
@@ -190,8 +191,8 @@ function route() { const h = (location.hash || '').replace(/^#\/?/, ''); const [
 function go(r) { closeDrawer(); location.hash = '#/' + r; }
 function shell() {
   const u = App.me.user, staff = isStaff();
-  const ws = staff ? `Super admin · ${esc(App.me.role?.label || '')}` : esc(App.me.merchant?.name || 'Merchant');
-  return `${App.mode === 'test' ? '<div class="test-banner">Test mode · simulated money · test cards and sandbox crypto only</div>' : ''}
+  const ws = staff ? (App.me.user.role === 'super_admin' ? 'Super admin' : `Staff · ${esc(App.me.role?.label || '')}`) : esc(App.me.merchant?.name || 'Merchant');
+  return `${App.mode === 'test' ? '<div class="test-banner">Test mode · Base Sepolia testnet · test USDC has no value</div>' : ''}
   <header class="topbar"><button class="btn sm menu-btn" data-act="menu" aria-label="Open navigation">☰</button>
     <div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>
     <span class="ws-label">${ws}</span><span class="spacer"></span>
@@ -213,12 +214,25 @@ async function render() {
   const { r, args } = route(), seq = ++renderSeq;
   const valid = (isStaff() ? NAV.admin : NAV.merchant).some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
   const name = valid ? r : (isStaff() ? 'a-overview' : 'home');
-  if (isStaff()) App.counts = await api('GET', '/a-api/overview').then(o => ({ 'a-approvals': Object.values(o.queues).reduce((a, b) => a + b, 0) - o.queues.alerts, 'a-alerts': o.queues.alerts })).catch(() => ({}));
+  if (isStaff()) App.counts = await api('GET', '/a-api/overview').then(o => ({ 'a-approvals': o.queues.wallets + o.queues.kyb + o.queues.adjustments, 'a-wallet': o.queues.wallets, 'a-risk': o.queues.alerts, 'a-refunds': o.usdc.refunds_open })).catch(() => ({}));
   $('#rail').innerHTML = rail(name); $('#rail').classList.remove('open');
   const main = $('#main'); if (!main.firstChild) main.innerHTML = '<div class="loading">Loading…</div>';
-  try { const html = await VIEWS[name](...args); if (seq !== renderSeq) return; main.innerHTML = `<div class="page">${html}</div>`; MOUNT[name]?.(); }
+  clearTimeout(App.refreshTimer); App.live = 0;
+  try { const html = await VIEWS[name](...args); if (seq !== renderSeq) return; main.innerHTML = `<div class="page">${html}</div>`; main.dataset.route = name; MOUNT[name]?.(); scheduleLive(seq); }
   catch (e) { if (seq !== renderSeq) return; main.innerHTML = `<div class="page">${note('danger', 'Could not load this page', esc(e.message))}</div>`; }
 }
+/** Live monitoring: a view sets App.live = ms while something is in flight (unconfirmed payments, pending refunds,
+    fee payments being verified); the page then re-renders itself unless a modal or drawer is open or the user is typing. */
+function scheduleLive(seq) {
+  if (!App.live) return;
+  App.refreshTimer = setTimeout(() => {
+    if (seq !== renderSeq) return;
+    const busy = $('#dlg').open || $('#drawerHost .drawer') || (document.activeElement && document.activeElement.matches('#main input, #main textarea, #main select'));
+    if (busy) return scheduleLive(seq);
+    render();
+  }, App.live);
+}
+const liveIf = (cond, ms = 5000) => { if (cond) App.live = ms; return cond ? '<span class="badge b-info" title="This page refreshes automatically while items are in flight">live</span>' : ''; };
 async function loadMe() { const r = await api('GET', '/auth/me'); App.me = r.user ? r : null; if (r.mfa_pending) App.authView = 'mfa'; await render(); }
 
 /* ---------------- global wiring ---------------- */

@@ -1,143 +1,234 @@
 'use strict';
-/* Hosted checkout. Talks only to /c-api with the unguessable session ID; never sees API keys. */
+/* Hosted checkout — MetaMask USDC on Base. Talks only to /c-api with the unguessable session ID; never sees API keys.
+   Flow: connect MetaMask → switch to the right Base network → sign a free wallet confirmation → send a plain USDC
+   transfer to the merchant's verified wallet → the server verifies the receipt on-chain and counts confirmations.
+   The page shows "paid" only when the server says the invoice is paid. */
 const $ = (s, el = document) => el.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const SYM = { USD: '$', EUR: '€', GBP: '£', AED: 'AED ', PKR: 'Rs ' };
-const fmt = (m, c) => { const s = (Math.abs(m) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return ['USDT', 'USDC'].includes(c) ? `${s} ${c}` : `${SYM[c] ?? ''}${s}`; };
-const COUNTRIES = { US: 'United States', GB: 'United Kingdom', DE: 'Germany', FR: 'France', AE: 'United Arab Emirates', PK: 'Pakistan', CA: 'Canada', AU: 'Australia', IN: 'India', SA: 'Saudi Arabia', NG: 'Nigeria', SG: 'Singapore' };
+const fmt = (m, c) => { const s = (Math.abs(m) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return c === 'USDC' ? `${s} USDC` : c === 'USD' ? `$${s}` : `${s} ${c}`; };
+const short = (s, a = 6, b = 4) => s && s.length > a + b + 3 ? `${s.slice(0, a)}…${s.slice(-b)}` : (s || '');
+const mmss = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+const MM = window.DHMetaMask;
 const sid = location.pathname.split('/').pop();
-const st = { s: null, method: 'card', asset: null, network: null, step: 'form', error: '', customer: { name: '', email: '', country: 'US' }, card: { number: '', exp: '', cvc: '' }, poll: null };
+const st = { s: null, step: 'loading', error: '', busy: '', email: '', name: '', wallet: null, chainOk: false, balances: null, detected: null, poll: null, manual: false };
 
-function toast(msg, kind = '') { const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 4000); }
+function toast(msg, kind = '') { const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 5000); }
 async function call(method, path, body) {
-  const r = await fetch('/c-api/sessions/' + sid + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
-  const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.error?.message || 'Something went wrong'); return d;
+  const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 30000);
+  let r;
+  try { r = await fetch('/c-api/sessions/' + encodeURIComponent(sid) + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: ctrl.signal }); }
+  catch (e) { throw new Error(e.name === 'AbortError' ? 'Checkout request timed out. Please try again.' : 'Could not connect to checkout. Check your connection and try again.'); }
+  finally { clearTimeout(timer); }
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(d.error?.message || `Checkout request failed (${r.status}).`); e.code = d.error?.code; e.status = r.status; throw e; }
+  return d;
 }
-function qr(el, text) { if (!el) return; el.innerHTML = ''; if (window.QRCode) { try { new QRCode(el, { text, width: 156, height: 156, colorDark: '#0C172A', colorLight: '#FFFFFF' }); return; } catch {} } el.innerHTML = '<span style="color:#0C172A;font-size:12px">QR unavailable</span>'; }
 
 async function load() {
-  try { st.s = await call('GET', ''); } catch (e) { $('#co').innerHTML = `<div class="co-body"><div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">!</div><h2>Checkout not found</h2><p class="muted">${esc(e.message)}</p></div></div>`; return; }
+  try { st.s = await call('GET', ''); }
+  catch (e) { $('#co').innerHTML = `<div class="co-body"><div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">!</div><h2>Checkout unavailable</h2><p class="muted">${esc(e.message)}</p><button class="btn" type="button" onclick="location.reload()">Try again</button></div></div>`; return; }
   const s = st.s;
-  $('#banner').innerHTML = s.mode === 'test' ? '<div class="test-banner">Test mode — no real money moves</div>' : '';
-  $('#modeNote').textContent = s.mode === 'test' ? 'sandbox' : 'live';
-  if (s.customer_email && !st.customer.email) st.customer.email = s.customer_email;
-  if (!s.methods.includes(st.method)) st.method = s.methods[0];
-  const p = s.payment;
-  if (p && ['awaiting_payment', 'confirming', 'underpaid'].includes(p.status)) st.step = 'crypto';
-  else if (p && p.status === 'requires_action') st.step = '3ds';
-  else if (s.status === 'complete' || (p && ['captured', 'settled', 'authorized', 'confirmed', 'overpaid'].includes(p.status))) st.step = 'done';
-  draw();
+  if (s.customer_email && !st.email) st.email = s.customer_email;
+  $('#banner').innerHTML = s.mode === 'test' ? '<div class="test-banner">Test mode · Base Sepolia testnet · test USDC has no value</div>' : '';
+  $('#modeNote').textContent = s.mode === 'test' ? 'Base Sepolia testnet' : 'Base mainnet';
+  st.detected = await MM.detect();
+  if (st.detected) { const w = await MM.reconnect().catch(() => null); if (w) st.wallet = w; }
+  route(); draw();
+  if (st.wallet) await checkWallet();
 }
-function top() { const s = st.s; return `<div class="co-top"><div><div class="eyebrow" style="color:var(--muted)">${esc(s.merchant.name)}</div><div class="co-amt">${fmt(s.amount, s.currency)}</div><div class="muted">${esc(s.description)}</div></div>${s.mode === 'test' ? '<span class="tag">TEST</span>' : ''}</div>`; }
+function route() {
+  const s = st.s, p = s.payment;
+  if (s.status === 'complete' || (p && ['confirmed', 'overpaid', 'partially_refunded', 'refunded'].includes(p.status))) st.step = 'done';
+  else if (s.status === 'expired') st.step = 'expired';
+  else if (p && p.method === 'usdc' && ['awaiting_payment', 'confirming', 'underpaid'].includes(p.status)) st.step = p.status === 'confirming' ? 'confirming' : 'pay';
+  else if (p && p.status === 'expired') st.step = 'quote_expired';
+  else st.step = 'connect';
+  if (['pay', 'confirming'].includes(st.step)) startPoll(); else stopPoll();
+}
+const chain = () => st.s.usdc?.chain || null;
+
+function header() {
+  const s = st.s, c = chain();
+  return `<div class="co-top"><div><div class="eyebrow" style="color:var(--muted)">${esc(s.merchant.name)}</div><div class="co-amt">${fmt(s.amount, 'USDC')}</div><div class="muted">${esc(s.description)}</div></div>
+    <div class="stack" style="align-items:flex-end;gap:6px">${c ? `<span class="net-chip"><i></i>${esc(c.chainName)}</span>` : ''}${s.mode === 'test' ? '<span class="tag">TEST</span>' : ''}</div></div>`;
+}
 function draw() {
-  const s = st.s, p = s.payment; let body = '';
-  if (s.status === 'expired') body = result('×', 'neutral', 'This checkout has expired', 'Return to the store and start again.');
-  else if (st.step === 'done') body = success(p);
-  else if (st.step === '3ds') body = threeDS(p);
-  else if (st.step === 'crypto' && p) body = cryptoPay(p);
-  else if (!s.methods.length) body = `<div class="note warn"><span>No payment method is available right now. Please contact ${esc(s.merchant.name)}.</span></div>`;
-  else body = form();
-  $('#co').innerHTML = top() + `<div class="co-body">${body}</div>` + (s.cancel_url && st.step !== 'done' ? `<div class="co-body" style="border-top:1px solid var(--line);padding-block:10px"><a href="${esc(s.cancel_url)}" class="faint" style="font-size:.8rem">← Cancel and return to ${esc(s.merchant.name)}</a></div>` : '');
+  const s = st.s; let body = '';
+  if (!s.methods.includes('usdc')) body = `<div class="note warn"><span>USDC payments are not available for this checkout right now. Please contact ${esc(s.merchant.name)}${s.merchant.support_email ? ` (${esc(s.merchant.support_email)})` : ''}.</span></div>`;
+  else if (st.step === 'done') body = success();
+  else if (st.step === 'expired') body = result('×', 'neutral', 'This checkout has expired', 'Return to the store and start again.');
+  else if (st.step === 'quote_expired') body = result('⏱', 'warn', 'Payment window closed', 'No transfer arrived in time. Nothing was charged.', `<button class="btn primary" data-act="restart">Start again</button>`);
+  else if (st.step === 'connect') body = connectView();
+  else if (st.step === 'pay') body = payView();
+  else if (st.step === 'confirming') body = confirmingView();
+  const cancel = s.cancel_url && !['done', 'confirming'].includes(st.step) ? `<div class="co-body" style="border-top:1px solid var(--line);padding-block:10px"><a href="${esc(s.cancel_url)}" class="faint" style="font-size:.8rem">← Cancel and return to ${esc(s.merchant.name)}</a></div>` : '';
+  $('#co').innerHTML = header() + `<div class="co-body">${body}</div>` + cancel;
   mount();
 }
 const result = (icon, tone, title, text, extra = '') => `<div class="result"><div class="icon" style="background:var(--${tone}-soft);color:var(--${tone === 'neutral' ? 'muted' : tone})">${icon}</div><h2>${esc(title)}</h2><p class="muted">${text}</p>${extra}</div>`;
-function form() {
-  const s = st.s, c = st.customer;
-  let h = s.methods.length > 1 ? `<div class="methods" role="group" aria-label="Payment method">${s.methods.map(m => `<button type="button" data-m="${m}" aria-pressed="${st.method === m}">${m === 'card' ? 'Card' : 'USDT / USDC'}<small>${m === 'card' ? 'Visa · Mastercard' : esc(s.crypto.provider)}</small></button>`).join('')}</div>` : '';
-  h += `<div class="form-grid"><label class="field"><span>Full name</span><input id="c-name" autocomplete="name" value="${esc(c.name)}"></label><label class="field"><span>Email for receipt</span><input id="c-email" type="email" autocomplete="email" value="${esc(c.email)}"></label>
-    <label class="field full"><span>Country</span><select id="c-country">${Object.entries(COUNTRIES).map(([k, v]) => `<option value="${k}" ${c.country === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label></div>`;
-  if (st.method === 'card') {
-    h += `<div class="hosted"><div class="hosted-label"><span>Card details</span><span>${s.mode === 'test' ? 'sandbox · test cards only' : 'secure'}</span></div>
-      <label class="field"><span>Card number</span><input id="c-num" inputmode="numeric" autocomplete="cc-number" placeholder="1234 1234 1234 1234" value="${esc(st.card.number)}"></label>
-      <div class="form-grid"><label class="field"><span>Expiry (MM/YY)</span><input id="c-exp" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/YY" value="${esc(st.card.exp)}"></label><label class="field"><span>CVC</span><input id="c-cvc" type="password" inputmode="numeric" autocomplete="cc-csc" maxlength="4" placeholder="123"></label></div></div>`;
-    if (s.test_cards.length) h += `<details><summary class="faint" style="cursor:pointer">Test cards</summary><div class="tc testcards" style="margin-top:8px">${s.test_cards.map(t => `<button type="button" data-card="${t.number}"><span class="mono">${t.number.replace(/(.{4})/g, '$1 ').trim()}</span><span class="muted">${esc(t.label)}</span></button>`).join('')}</div><p class="faint" style="margin-top:6px">Any future expiry, any CVC. 3DS code: 123456.</p></details>`;
-    h += err() + `<button class="btn primary" style="width:100%;padding:12px" id="payCard">Pay ${fmt(s.amount, s.currency)}</button>`;
+const err = () => st.error ? `<div class="note danger" role="alert"><span>${esc(st.error)}</span></div>` : '';
+const busyBtn = (id, label, cls = 'primary') => `<button class="btn ${cls} mm-btn" id="${id}" ${st.busy ? 'disabled' : ''}>${st.busy && st.busy === id ? esc(st.busyText || 'Working…') : label}</button>`;
+function steps(active) {
+  const list = [['Connect MetaMask', 'Choose the account you will pay from.'], [`Switch to ${chain()?.chainName}`, 'MetaMask may ask to switch or add the network.'], ['Confirm your wallet', 'A free signature — no funds move, nothing is approved.'], ['Send USDC', 'One plain token transfer straight to the merchant.']];
+  return `<ol class="steps-v">${list.map(([t, d], i) => `<li><span class="dot ${i < active ? 'done' : i === active ? 'on' : ''}">${i < active ? '✓' : i + 1}</span><div><b>${esc(t)}</b><div>${esc(d)}</div></div></li>`).join('')}</ol>`;
+}
+function connectView() {
+  const c = chain(), w = st.wallet;
+  let h = `<label class="field"><span>Email for your receipt</span><input id="c-email" type="email" autocomplete="email" value="${esc(st.email)}" placeholder="you@example.com"></label>`;
+  if (!w) {
+    h += steps(0);
+    if (st.detected) h += busyBtn('connect', '<span class="mm-mark"></span> Connect MetaMask');
+    else h += `<div class="note info"><span>MetaMask was not found in this browser.</span></div>
+      ${MM.isMobile() ? `<a class="btn primary mm-btn" href="${esc(MM.deepLink())}"><span class="mm-mark"></span> Open in MetaMask app</a>` : `<a class="btn primary mm-btn" href="https://metamask.io/download/" target="_blank" rel="noopener"><span class="mm-mark"></span> Install MetaMask</a>`}
+      ${busyBtn('connectMobile', 'Connect MetaMask Mobile (QR)', '')}`;
   } else {
-    const opts = s.crypto.options, assets = [...new Set(opts.map(o => o.asset))];
-    if (!assets.includes(st.asset)) st.asset = assets[0];
-    const nets = opts.filter(o => o.asset === st.asset); if (!nets.some(n => n.network === st.network)) st.network = nets[0]?.network;
-    const n = nets.find(x => x.network === st.network);
-    h += `<div class="methods" role="group" aria-label="Stablecoin">${assets.map(a => `<button type="button" data-a="${a}" aria-pressed="${st.asset === a}">${a}<small>${a === 'USDT' ? 'Tether USD' : 'USD Coin'}</small></button>`).join('')}</div>
-      <label class="field"><span>Network</span><select id="c-net">${nets.map(x => `<option value="${x.network}" ${x.network === st.network ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select><small>Send only ${st.asset} on this network.</small></label>
-      <div class="card" style="background:var(--bg)"><dl class="kv"><dt>You pay</dt><dd><b class="num">${fmt(s.crypto.quotes[st.asset], st.asset)}</b></dd><dt>Processed by</dt><dd>${esc(s.crypto.provider)}</dd><dt>Confirmations</dt><dd>${n?.confirmations ?? '—'}</dd><dt>Quote valid</dt><dd>15 minutes</dd></dl></div>`
-      + err() + `<button class="btn primary" style="width:100%;padding:12px" id="payCrypto">Continue</button>`;
+    h += `<div class="acct"><div><div class="faint" style="font-size:.72rem;font-weight:700">PAYING FROM</div><span class="mono">${esc(short(w.account, 8, 6))}</span></div><button class="btn sm ghost" data-act="disconnect">Change</button></div>`;
+    if (!st.chainOk) h += steps(1) + busyBtn('switch', `Switch MetaMask to ${esc(c.chainName)}`);
+    else {
+      h += balanceNotes() + steps(2) + busyBtn('confirm', 'Confirm wallet in MetaMask');
+    }
   }
+  return h + err() + `<p class="faint" style="font-size:.75rem">USDC contract <span class="mono">${esc(short(c.usdc, 8, 6))}</span> on ${esc(c.chainName)} · ${st.s.usdc.confirmations} confirmations required.</p>`;
+}
+function balanceNotes() {
+  const b = st.balances, c = chain(); if (!b) return '';
+  const need = BigInt(st.s.payment?.crypto?.remaining_units || st.s.usdc.amount_units);
+  let h = '';
+  if (b.usdc < need) h += `<div class="note warn"><span>This account holds ${esc(MM.formatUnits(b.usdc))} USDC on ${esc(c.chainName)}; ${esc(MM.formatUnits(need))} is needed.${c.testnet ? ` Get test USDC at <a href="https://faucet.circle.com" target="_blank" rel="noopener">faucet.circle.com</a> (choose Base Sepolia).` : ''}</span></div>`;
+  if (b.eth === 0n) h += `<div class="note warn"><span>No ETH on ${esc(c.chainName)} for the network fee (gas).${c.testnet ? ' Use a Base Sepolia ETH faucet (for example the Coinbase Developer Platform faucet).' : ''}</span></div>`;
   return h;
 }
-const err = () => st.error ? `<div class="note danger"><span>${esc(st.error)}</span></div>` : '';
-function threeDS(p) {
-  return `<div class="hosted" style="border-style:solid"><div class="hosted-label"><span>${p.card?.brand === 'Visa' ? 'Visa Secure' : 'Mastercard Identity Check'}</span><span>${st.s.mode === 'test' ? 'sandbox issuer' : 'issuer'}</span></div>
-    <h3>Confirm this purchase</h3><p class="muted">Your bank sent a one-time code. ${st.s.mode === 'test' ? 'Sandbox code: 123456.' : ''}</p>
-    <label class="field"><span>One-time code</span><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>${err()}
-    <div class="row"><button class="btn primary" id="otpGo">Verify</button><button class="btn ghost" id="otpCancel">Cancel</button></div></div>`;
+function payView() {
+  const p = st.s.payment, c = p.crypto, w = st.wallet, ch = chain();
+  const remaining = BigInt(c.remaining_units || '0'), wrongAcct = w && !MM.same(w.account, c.payer);
+  let h = `<div class="card" style="background:var(--bg)"><dl class="kv"><dt>Send</dt><dd><b class="num">${esc(MM.formatUnits(remaining))} USDC</b></dd><dt>To merchant wallet</dt><dd class="mono">${esc(short(c.recipient, 10, 8))}</dd><dt>Network</dt><dd>${esc(ch.chainName)} (${ch.chainId})</dd><dt>From</dt><dd class="mono">${esc(short(c.payer, 10, 8))}</dd><dt>Time left</dt><dd class="num" id="cd">${mmss(c.expires_at - Date.now())}</dd></dl></div>`;
+  if (p.status === 'underpaid') h += `<div class="note warn"><span>Received ${esc(MM.formatUnits(c.received_units))} of ${esc(MM.formatUnits(c.amount_units))} USDC. Send the remaining ${esc(MM.formatUnits(remaining))} USDC to complete this payment.</span></div>`;
+  const rejected = c.txs.filter(t => ['rejected', 'not_found'].includes(t.status)).slice(-1)[0];
+  if (rejected) h += `<div class="note danger"><span>Transaction <a href="${esc(rejected.url)}" target="_blank" rel="noopener" class="mono">${esc(short(rejected.hash, 10, 6))}</a> was not accepted: ${esc(rejected.reason)}</span></div>`;
+  if (!w) h += busyBtn('connect', '<span class="mm-mark"></span> Reconnect MetaMask to pay');
+  else if (wrongAcct) h += `<div class="note warn"><span>MetaMask is on ${esc(short(w.account, 8, 6))}, but this payment was confirmed for ${esc(short(c.payer, 8, 6))}. Switch accounts in MetaMask, or start over with the new account.</span></div><button class="btn mm-btn" data-act="changeWallet">Use the new account instead</button>`;
+  else if (!st.chainOk) h += busyBtn('switch', `Switch MetaMask to ${esc(ch.chainName)}`);
+  else h += balanceNotes() + busyBtn('send', `<span class="mm-mark"></span> Pay ${esc(MM.formatUnits(remaining))} USDC with MetaMask`);
+  h += err();
+  h += st.manual ? `<div class="stack"><label class="field"><span>Transaction hash</span><input id="m-hash" class="mono" placeholder="0x…" autocomplete="off" spellcheck="false"></label><button class="btn" id="m-submit">Check transaction</button></div>`
+    : `<button class="btn sm ghost" data-act="manual">Already sent it from MetaMask? Enter the transaction hash</button>`;
+  if (!c.txs.some(t => ['pending', 'confirming', 'confirmed'].includes(t.status))) h += `<button class="btn sm ghost" data-act="changeWallet">Pay from a different wallet</button>`;
+  return h;
 }
-function cryptoPay(p) {
-  const c = p.crypto, remaining = c.amount_due - c.received, left = Math.max(0, c.expires_at - Date.now());
-  if (c.checkout_url && st.s.mode === 'live') return `<div class="row" style="justify-content:space-between">${pill(p.status)}</div><p class="muted">Complete the payment with ${esc(c.provider === 'binance' ? 'Binance Pay' : 'Coinbase')}. This page updates automatically.</p>
-    <div class="row" style="align-items:flex-start"><div class="qr" id="qr"></div><div class="stack" style="flex:1;min-width:180px"><b class="num" style="font-size:1.2rem">${fmt(c.amount_due, c.asset)}</b><a class="btn primary" href="${esc(c.checkout_url)}" target="_blank" rel="noopener">Open ${esc(c.provider === 'binance' ? 'Binance Pay' : 'Coinbase')}</a></div></div><span id="qrText" hidden>${esc(c.qr || c.checkout_url)}</span>`;
-  const status = { awaiting_payment: 'Waiting for your transfer…', confirming: `Payment detected · ${c.confirmations}/${c.required} confirmations`, underpaid: `Received ${fmt(c.received, c.asset)} · ${fmt(remaining, c.asset)} still due` }[p.status] || p.status;
-  return `<div class="row" style="justify-content:space-between">${pill(p.status)}${p.status === 'awaiting_payment' ? `<span class="num muted" id="cd">${mmss(left)}</span>` : ''}</div>
-    <div class="row" style="align-items:flex-start"><div class="qr" id="qr"></div><div class="stack" style="flex:1;min-width:180px">
-      <div><div class="faint" style="font-size:.75rem;font-weight:700">SEND EXACTLY</div><div class="row"><b class="num" style="font-size:1.25rem">${fmt(p.status === 'underpaid' ? remaining : c.amount_due, c.asset)}</b><button class="btn sm ghost" data-copy="${((p.status === 'underpaid' ? remaining : c.amount_due) / 100).toFixed(2)}">Copy</button></div></div>
-      <div><div class="faint" style="font-size:.75rem;font-weight:700">${c.network === 'BINANCE_PAY' ? 'BINANCE PAY ID' : 'TO ADDRESS'} · ${esc(c.network_label)}</div><div class="addr">${esc(c.address)}</div><button class="btn sm ghost" data-copy="${esc(c.address)}">Copy</button></div></div></div>
-    <div><div class="row" style="justify-content:space-between;margin-bottom:6px"><b>${esc(status)}</b><span class="faint num">${c.confirmations}/${c.required}</span></div><div class="progress"><div style="width:${Math.round(c.confirmations / c.required * 100)}%"></div></div></div>
-    ${st.s.mode === 'test' ? `<div class="sim"><h4>Sandbox · wallet simulator</h4><div class="row">${p.status === 'awaiting_payment' ? '<button class="btn sm" data-sim="exact">Send exact</button><button class="btn sm" data-sim="under">Send 90%</button><button class="btn sm" data-sim="over">Send 105%</button>' + (c.network === 'BINANCE_PAY' ? '' : '<button class="btn sm" data-sim="wrong">Wrong network</button>') + '<button class="btn sm ghost" data-sim="expire">Let quote expire</button>' : p.status === 'underpaid' ? '<button class="btn sm" data-sim="topup">Send the rest</button>' : '<span class="faint">Confirming…</span>'}</div></div>` : ''}
-    <span id="qrText" hidden>${esc(c.network === 'BINANCE_PAY' ? c.address : `${c.asset.toLowerCase()}:${c.address}?amount=${(c.amount_due / 100).toFixed(2)}`)}</span>`;
+function confirmingView() {
+  const p = st.s.payment, c = p.crypto, live = c.txs.filter(t => ['pending', 'confirming'].includes(t.status));
+  const conf = Math.min(c.required, live.length ? Math.min(...live.map(t => t.confirmations)) : c.confirmations), pct = Math.round(conf / c.required * 100);
+  return `<div class="result" style="padding-bottom:0"><div class="icon" style="background:var(--info-soft);color:var(--info)">⛓</div><h2>Verifying on ${esc(chain().chainName)}</h2>
+      <p class="muted">Your transfer was broadcast. Digital Hub is checking the receipt, the USDC contract, the recipient and the amount, and waiting for ${c.required} confirmations${c.finality !== 'confirmations' ? ` plus "${esc(c.finality)}" finality` : ''}. You can close this page — the merchant is notified automatically.</p></div>
+    <div><div class="row" style="justify-content:space-between;margin-bottom:6px"><b>${live.some(t => t.status === 'pending') ? 'Waiting for the first block…' : 'Confirming'}</b><span class="faint num">${conf}/${c.required}</span></div><div class="progress"><div style="width:${pct}%"></div></div></div>
+    ${c.txs.map(t => `<div class="txrow"><a class="mono" href="${esc(t.url)}" target="_blank" rel="noopener">${esc(short(t.hash, 10, 8))}</a><span class="badge ${t.status === 'confirmed' ? 'b-ok' : ['rejected', 'not_found'].includes(t.status) ? 'b-danger' : 'b-info'}">${esc(t.status.replace(/_/g, ' '))}</span></div>`).join('')}
+    ${err()}`;
 }
-const pill = s => `<span class="badge ${['confirmed', 'captured', 'settled'].includes(s) ? 'b-ok' : ['underpaid', 'overpaid'].includes(s) ? 'b-warn' : ['declined', 'expired', 'wrong_network'].includes(s) ? 'b-danger' : 'b-info'}">${esc(s.replace(/_/g, ' '))}</span>`;
-const mmss = ms => `Quote expires in ${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor(ms % 60000 / 1000)).padStart(2, '0')}`;
-function success(p) {
-  const s = st.s, url = s.success_url ? s.success_url + (s.success_url.includes('?') ? '&' : '?') + 'session_id=' + encodeURIComponent(s.id) : null;
-  if (url) setTimeout(() => { location.href = url; }, 4000);
-  const extra = p?.status === 'overpaid' ? `You sent ${fmt(p.crypto.excess, p.crypto.asset)} more than required; ${esc(s.merchant.name)} will return it.` : p?.status === 'authorized' ? 'Your card is authorized; the merchant captures it when your order ships.' : `A receipt goes to your email.`;
-  return result('✓', 'ok', 'Payment successful', extra, `${p ? `<dl class="kv" style="text-align:left;width:100%"><dt>Reference</dt><dd class="mono">${esc(p.id)}</dd><dt>Paid with</dt><dd>${p.card ? `${esc(p.card.brand)} ••${esc(p.card.last4)}` : `${p.crypto.asset} · ${esc(p.crypto.network_label)}`}</dd></dl>` : ''}${url ? `<a class="btn primary" href="${esc(url)}">Return to ${esc(s.merchant.name)}</a><span class="faint">Redirecting…</span>` : ''}`);
+function success() {
+  const s = st.s, p = s.payment, c = p?.crypto, url = s.success_url ? s.success_url + (s.success_url.includes('?') ? '&' : '?') + 'session_id=' + encodeURIComponent(s.id) : null;
+  if (url && !st.redirecting) { st.redirecting = true; setTimeout(() => { location.href = url; }, 6000); }
+  const tx = c?.txs?.filter(t => t.status === 'confirmed') || [];
+  const extra = p?.status === 'overpaid' ? `You sent ${fmt(c.excess, 'USDC')} more than required; ${esc(s.merchant.name)} will refund the difference to your wallet.` : `Verified on ${esc(chain()?.chainName || 'Base')}. ${esc(s.merchant.name)} has been notified.`;
+  return `<div class="thank-you"><div class="thank-you-mark" aria-hidden="true"><span>✓</span></div><h2>Payment received</h2><p class="muted">${extra}</p>
+    <div class="thank-you-details"><div><span>Amount</span><b>${fmt(p?.amount ?? s.amount, 'USDC')}</b></div>
+      ${c ? `<div><span>From wallet</span><b class="mono">${esc(short(c.payer, 8, 6))}</b></div><div><span>Network</span><b>${esc(chain()?.chainName || c.network)}</b></div>` : ''}
+      <div><span>Status</span><b class="paid-status">${esc((p?.status || 'paid').replace(/_/g, ' '))}</b></div>
+      ${tx.map(t => `<div><span>Transaction</span><b><a class="mono" href="${esc(t.url)}" target="_blank" rel="noopener">${esc(short(t.hash, 10, 8))}</a></b></div>`).join('')}
+      ${p?.id ? `<div><span>Reference</span><b class="mono">${esc(p.id)}</b></div>` : ''}</div>
+    ${url ? `<a class="btn primary" href="${esc(url)}">Return to ${esc(s.merchant.name)}</a><span class="faint">Returning to the store…</span>` : ''}</div>`;
 }
-function failure(p) {
-  const msg = p.status === 'declined' ? (p.decline || 'Your bank declined the payment.') : p.status === 'expired' ? 'The quote expired before funds arrived.' : 'We saw a transfer on a different network. Support will contact you to recover it.';
-  st.step = 'form'; st.error = msg;
+
+/* ---------------- actions ---------------- */
+async function act(id, text, fn) {
+  if (st.busy) return; st.busy = id; st.busyText = text; st.error = ''; draw();
+  try { await fn(); } catch (e) { st.error = e.code && typeof e.code === 'number' ? MM.message(e) : (e.message || MM.message(e)); }
+  finally { st.busy = ''; draw(); }
+}
+async function checkWallet() {
+  const w = st.wallet, c = chain(); if (!w || !c) return;
+  st.chainOk = (await MM.chainId(w.provider).catch(() => '')) === c.chainIdHex.toLowerCase();
+  if (st.chainOk) {
+    try { const [usdc, eth] = await Promise.all([MM.tokenBalance(w.provider, c.usdc, w.account), MM.nativeBalance(w.provider, w.account)]); st.balances = { usdc, eth }; } catch { st.balances = null; }
+  }
+  draw();
+}
+function watchWallet() {
+  MM.on('accountsChanged', a => { if (!a?.length) st.wallet = null; else if (st.wallet) st.wallet.account = a[0]; st.balances = null; checkWallet(); draw(); });
+  MM.on('chainChanged', () => checkWallet());
+}
+async function doConnect(force) {
+  st.email = $('#c-email')?.value?.trim() || st.email;
+  st.wallet = await MM.connect(chain(), { forceConnect: force });
+  watchWallet();
+  await checkWallet();
+}
+async function doSwitch() { await MM.ensureChain(st.wallet.provider, chain()); await checkWallet(); }
+async function doConfirm() {
+  st.email = $('#c-email')?.value?.trim() || st.email;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(st.email)) throw new Error('Enter a valid email address for your receipt.');
+  await MM.ensureChain(st.wallet.provider, chain());
+  const ch = await call('POST', '/usdc/challenge', { address: st.wallet.account });
+  st.busyText = 'Sign in MetaMask…'; draw();
+  const signature = await MM.sign(st.wallet.provider, st.wallet.account, ch.message);
+  st.busyText = 'Creating payment…'; draw();
+  st.s.payment = await call('POST', '/usdc/start', { address: st.wallet.account, signature, email: st.email, name: st.name });
+  route();
+}
+async function doSend() {
+  const p = st.s.payment, req = p.crypto.tx_request;
+  if (!req) throw new Error('Nothing left to pay.');
+  await MM.ensureChain(st.wallet.provider, chain());
+  if (!MM.same(st.wallet.account, req.from)) throw new Error('Switch MetaMask to the account that confirmed this payment.');
+  st.busyText = 'Confirm in MetaMask…'; draw();
+  const hash = await MM.sendTransfer(st.wallet.provider, req);
+  st.busyText = 'Verifying…'; draw();
+  await submitHash(hash);
+}
+async function submitHash(hash) {
+  try { st.s.payment = await call('POST', `/payments/${st.s.payment.id}/tx`, { hash }); }
+  catch (e) {
+    if (e.code === 'tx_already_used') { toast('Your transaction is already being verified.'); st.s.payment = await call('GET', `/payments/${st.s.payment.id}`); }
+    else if (e.status >= 500 || e.code === 'rpc_unavailable') { toast('Transaction sent. Verification will continue automatically.', 'warn'); }
+    else throw e;
+  }
+  route();
+  const rej = st.s.payment.crypto.txs.find(t => t.hash === String(hash).toLowerCase() && t.status === 'rejected');
+  if (rej) throw new Error('This transaction cannot pay the invoice: ' + rej.reason);
 }
 
 function mount() {
-  const p = st.s.payment;
-  document.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { capture(); st.method = b.dataset.m; st.error = ''; draw(); });
-  document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => { capture(); st.asset = b.dataset.a; draw(); });
-  document.querySelectorAll('[data-card]').forEach(b => b.onclick = () => { capture(); st.card = { number: b.dataset.card.replace(/(.{4})/g, '$1 ').trim(), exp: '12/34', cvc: '' }; draw(); $('#c-cvc').value = '123'; });
-  document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => toast('Copied')));
-  document.querySelectorAll('[data-sim]').forEach(b => b.onclick = () => act(async () => { st.s.payment = await call('POST', `/payments/${p.id}/simulate`, { kind: b.dataset.sim }); afterCrypto(); }));
-  const net = $('#c-net'); if (net) net.onchange = () => { capture(); st.network = net.value; draw(); };
-  const num = $('#c-num'); if (num) num.oninput = () => { num.value = num.value.replace(/\D/g, '').slice(0, 19).replace(/(.{4})/g, '$1 ').trim(); };
-  const exp = $('#c-exp'); if (exp) exp.oninput = () => { const d = exp.value.replace(/\D/g, '').slice(0, 4); exp.value = d.length > 2 ? d.slice(0, 2) + '/' + d.slice(2) : d; };
-  const pc = $('#payCard'); if (pc) pc.onclick = () => act(async () => { capture(); pc.disabled = true; pc.textContent = 'Processing…'; const r = await call('POST', '/card', { ...st.customer, number: st.card.number, exp: st.card.exp, cvc: $('#c-cvc').value }); st.s.payment = r; st.card.number = ''; afterCard(r); });
-  const pcr = $('#payCrypto'); if (pcr) pcr.onclick = () => act(async () => { capture(); pcr.disabled = true; const r = await call('POST', '/crypto', { ...st.customer, asset: st.asset, network: st.network }); st.s.payment = r; st.step = 'crypto'; draw(); });
-  const og = $('#otpGo'); if (og) og.onclick = () => act(async () => { const r = await call('POST', `/payments/${p.id}/3ds`, { code: $('#otp').value }); st.s.payment = r; afterCard(r); });
-  const oc = $('#otpCancel'); if (oc) oc.onclick = () => act(async () => { const r = await call('POST', `/payments/${p.id}/3ds`, { code: 'cancel' }); st.s.payment = r; afterCard(r); });
-  if (st.step === 'crypto' && p) { qr($('#qr'), $('#qrText')?.textContent || ''); startPoll(); }
+  const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+  on('#connect', () => act('connect', 'Open MetaMask…', () => doConnect(false)));
+  on('#connectMobile', () => act('connectMobile', 'Loading MetaMask Connect…', () => doConnect(true)));
+  on('#switch', () => act('switch', 'Approve in MetaMask…', doSwitch));
+  on('#confirm', () => act('confirm', 'Preparing…', doConfirm));
+  on('#send', () => act('send', 'Preparing…', doSend));
+  on('#m-submit', () => act('m-submit', 'Checking…', async () => { const h = ($('#m-hash').value || '').trim(); if (!/^0x[0-9a-fA-F]{64}$/.test(h)) throw new Error('A transaction hash is 0x followed by 64 hex characters.'); await submitHash(h); st.manual = false; }));
+  document.querySelectorAll('[data-act]').forEach(b => b.onclick = () => ({
+    disconnect: () => { st.wallet = null; st.balances = null; st.chainOk = false; draw(); },
+    manual: () => { st.manual = true; draw(); },
+    changeWallet: () => act('change', 'Cancelling…', async () => { await call('POST', `/payments/${st.s.payment.id}/cancel`); st.s.payment = null; st.wallet = null; st.chainOk = false; route(); }),
+    restart: () => act('restart', 'Starting over…', async () => { await call('POST', `/payments/${st.s.payment.id}/retry`); st.s.payment = null; route(); }),
+  })[b.dataset.act]?.());
+  const e = $('#c-email'); if (e) e.oninput = () => { st.email = e.value.trim(); };
 }
-function capture() {
-  if ($('#c-name')) st.customer = { name: $('#c-name').value.trim(), email: $('#c-email').value.trim(), country: $('#c-country').value };
-  if ($('#c-num')) st.card = { number: $('#c-num').value, exp: $('#c-exp').value, cvc: '' };
-}
-async function act(fn) { st.error = ''; try { await fn(); } catch (e) { st.error = e.message; if (st.step === '3ds' || st.step === 'crypto') toast(e.message, 'err'); draw(); } }
-async function afterCard(p) {
-  if (p.status === 'requires_action') st.step = '3ds';
-  else if (['captured', 'authorized', 'settled'].includes(p.status)) { st.step = 'done'; }
-  else { failure(p); await call('POST', `/payments/${p.id}/retry`).catch(() => {}); }
-  draw();
-}
-async function afterCrypto() {
-  const p = st.s.payment;
-  if (['confirmed', 'overpaid'].includes(p.status)) { st.step = 'done'; stopPoll(); }
-  else if (['expired', 'wrong_network', 'declined'].includes(p.status)) { stopPoll(); failure(p); await call('POST', `/payments/${p.id}/retry`).catch(() => {}); }
-  draw();
-}
+
+/* ---------------- live status ---------------- */
 function startPoll() {
   if (st.poll) return;
   st.poll = setInterval(async () => {
-    const p = st.s.payment; if (!p || st.step !== 'crypto') return stopPoll();
-    const cd = $('#cd'); if (cd) cd.textContent = mmss(Math.max(0, p.crypto.expires_at - Date.now()));
+    const p = st.s.payment; if (!p) return stopPoll();
+    const cd = $('#cd'); if (cd) cd.textContent = mmss(p.crypto.expires_at - Date.now());
     st.tick = (st.tick || 0) + 1;
-    if (st.tick % 3 === 0) { try { const fresh = await call('GET', `/payments/${p.id}`); if (fresh.status !== p.status || fresh.crypto.confirmations !== p.crypto.confirmations || fresh.crypto.received !== p.crypto.received) { st.s.payment = fresh; afterCrypto(); } } catch {} }
+    if (st.tick % 3 !== 0 || st.busy) return;
+    try {
+      const fresh = await call('GET', `/payments/${p.id}`), before = JSON.stringify(p);
+      st.s.payment = fresh;
+      if (['confirmed', 'overpaid'].includes(fresh.status)) st.s = await call('GET', '');
+      if (JSON.stringify(fresh) !== before) { route(); draw(); }
+    } catch (e) { if (e.status === 404) { stopPoll(); st.error = e.message; draw(); } }
   }, 1000);
 }
 function stopPoll() { clearInterval(st.poll); st.poll = null; }
+
 load();
