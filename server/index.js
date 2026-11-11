@@ -22,6 +22,7 @@ require('./routes/api').routes(route);
 require('./routes/merchant').routes(route);
 require('./routes/admin').routes(route);
 require('./routes/checkout').routes(route);
+require('./routes/supabase').routes(route);
 
 const PUBLIC = path.join(config.ROOT, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
@@ -79,13 +80,13 @@ const errorResult = (e, headers = {}) => {
 };
 
 /* API logs: every /v1 call, inbound provider hook and customer-checkout write (status polls are skipped). */
-const LOGGED = /^\/(v1|hooks)\//;
+const LOGGED = /^\/(v1|sb-api|hooks)\//;
 function logApi(ctx, status, ms, err) {
   if (!LOGGED.test(ctx.path) && !(ctx.path.startsWith('/c-api/') && ctx.method !== 'GET')) return;
   try {
     let mid = ctx.auth?.merchant_id || null;
     const cs = ctx.path.match(/^\/c-api\/sessions\/(cs_[A-Za-z0-9]+)/); if (!mid && cs) mid = store.get('checkout_sessions', cs[1])?.merchant_id || null;
-    store.put('api_logs', { id: U.id('log'), merchant_id: mid, mode: ctx.auth?.mode || null, status: status >= 400 ? 'error' : 'ok', kind: ctx.path.startsWith('/v1/') ? 'api' : ctx.path.startsWith('/hooks/') ? 'webhook_in' : 'checkout',
+    store.put('api_logs', { id: U.id('log'), merchant_id: mid, mode: ctx.auth?.mode || null, status: status >= 400 ? 'error' : 'ok', kind: ctx.path.startsWith('/v1/') ? 'api' : ctx.path.startsWith('/sb-api/') ? 'supabase' : ctx.path.startsWith('/hooks/') ? 'webhook_in' : 'checkout',
       method: ctx.method, path: ctx.path.replace(/(cs|pay|re|stl)_[A-Za-z0-9]+/g, '$1_…'), full_path: ctx.path, code: status, ms, ip: ctx.ip, key: ctx.auth?.key || null,
       idempotency_key: U.str(ctx.headers['idempotency-key'], 80) || null, error: err || null, ua: U.str(ctx.headers['user-agent'], 120) });
   } catch (e) { console.error('[api-log]', e.message); }
@@ -114,7 +115,7 @@ async function handle(req, res) {
   const forwarded = config.serverless ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
   const ip = forwarded || (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   const pathname = decodeURIComponent(url.pathname);
-  const isApi = /^\/(v1|auth|m-api|a-api|c-api|hooks|api)\//.test(pathname);
+  const isApi = /^\/(v1|auth|m-api|a-api|c-api|sb-api|hooks|api)\//.test(pathname);
 
   if (!isApi && req.method === 'GET' && !/^\/(pay|l|downloads)\//.test(pathname)) {
     if (pathname === '/' || pathname === '/app' || pathname === '/admin') return serveStatic(res, path.join(PUBLIC, 'app.html'));

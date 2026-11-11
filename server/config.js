@@ -45,7 +45,7 @@ function setupProblems() {
 module.exports = {
   ROOT, production, serverless, setupProblems,
   databaseUrl, databaseSsl: env('DATABASE_SSL'), databaseCa: env('DATABASE_CA_CERT').replace(/\\n/g, '\n'),
-  supabaseUrl: env('SUPABASE_URL').replace(/\/$/, ''), supabaseAnonKey: env('SUPABASE_ANON_KEY'),
+  supabaseUrl: env('SUPABASE_URL').replace(/\/$/, ''), supabaseAnonKey: env('SUPABASE_ANON_KEY') || env('SUPABASE_PUBLISHABLE_KEY'), // publishable key replaces the legacy anon key
   cronSecret: env('CRON_SECRET'),
   port: +env('PORT', '3000'),
   publicUrl,

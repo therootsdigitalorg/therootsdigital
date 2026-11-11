@@ -42,7 +42,7 @@ async function launch() {
   const sepolia = fakeChain({ chainId: 84532, usdc: SEPOLIA_USDC });
   const sepUrl = await sepolia.listen();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dh-ui-'));
-  Object.assign(process.env, { DB_PATH: path.join(tmp, 'ui.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1', BASE_SEPOLIA_RPC_URLS: sepUrl, CHAIN_POLL_MS: '1500' });
+  Object.assign(process.env, { DB_PATH: path.join(tmp, 'ui.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1', BASE_SEPOLIA_RPC_URLS: sepUrl, CHAIN_POLL_MS: '1500', SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_PUBLISHABLE_KEY: '', SUPABASE_SECRET_KEY: '', SUPABASE_JWKS_URL: '' });
   const { server, start } = require('../server/index');
   let BASE; await new Promise(r => { const orig = server.listen.bind(server); server.listen = (port, cb) => orig(0, () => { BASE = `http://127.0.0.1:${server.address().port}`; process.env.PUBLIC_URL = BASE; cb && cb(); r(); }); start(); });
   const creds = fs.readFileSync(path.join(tmp, 'first-run-credentials.txt'), 'utf8');

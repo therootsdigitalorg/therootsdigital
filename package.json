@@ -20,6 +20,8 @@
   "dependencies": {
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
+    "@supabase/server": "^1.9.2",
+    "@supabase/supabase-js": "^2.119.0",
     "@vercel/functions": "^3.10.6",
     "pg": "^8.23.1"
   }

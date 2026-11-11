@@ -33,7 +33,9 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
   const [sepUrl, mainUrl, wrongUrl] = [await sepolia.listen(), await mainnet.listen(), await wrongChain.listen()];
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dh-test-'));
   Object.assign(process.env, { DB_PATH: path.join(tmp, 'test.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1',
-    BASE_SEPOLIA_RPC_URLS: sepUrl, BASE_RPC_URLS: mainUrl, CHAIN_POLL_MS: '3600000' });
+    BASE_SEPOLIA_RPC_URLS: sepUrl, BASE_RPC_URLS: mainUrl, CHAIN_POLL_MS: '3600000',
+    // isolate from a developer's real .env: no Supabase project during tests unless a step sets one
+    SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_PUBLISHABLE_KEY: '', SUPABASE_SECRET_KEY: '', SUPABASE_JWKS_URL: '', SUPABASE_JWKS: '' });
   const { server, start } = require('../server/index');
   const DigitalHub = require('../sdk/node/digitalhub');
   const store = require('../server/db'), usdc = require('../server/usdc'), core = require('../server/core');
@@ -329,6 +331,34 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     store.supabaseProfile = (idv, email) => idv === 'auth-user-id' && email === 'supabase-admin@example.com' ? { id: idv, email, role: 'admin' } : null;
     try { const s = client(); ok(await s('POST', '/auth/login', { email: 'supabase-admin@example.com', password: 'SupabasePass123' })); ok(await s('GET', '/a-api/overview')); assert.equal((await client()('POST', '/auth/login', { email: 'not-admin@example.com', password: 'SupabasePass123' })).status, 401); }
     finally { global.fetch = oldFetch; store.supabaseProfile = oldProfile; config.supabaseUrl = oldUrl; config.supabaseAnonKey = oldKey; }
+  });
+  await step('Supabase API (/sb-api): JWKS-verified user token, email-confirmed account link, tenant scope, secret-key endpoint', async () => {
+    const nodeCrypto = require('node:crypto'), url = 'https://sbtest.supabase.co';
+    const { publicKey, privateKey } = nodeCrypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'test-kid', alg: 'ES256', use: 'sig' };
+    const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const jwt = (claims, key = privateKey) => { const h = b64({ alg: 'ES256', typ: 'JWT', kid: 'test-kid' }), p = b64({ aud: 'authenticated', role: 'authenticated', iss: url + '/auth/v1', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, ...claims });
+      return `${h}.${p}.${nodeCrypto.sign('sha256', Buffer.from(h + '.' + p), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`; };
+    const saved = { ...process.env }, oldFetch = global.fetch;
+    Object.assign(process.env, { SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test123', SUPABASE_SECRET_KEY: 'sb_secret_test123', SUPABASE_JWKS: JSON.stringify({ keys: [jwk] }) });
+    const sbUsers = { '11111111-1111-4111-8111-111111111111': { id: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test', email_confirmed_at: new Date().toISOString() }, '22222222-2222-4222-8222-222222222222': { id: '22222222-2222-4222-8222-222222222222', email: 'owner@northwind.test', email_confirmed_at: null } };
+    global.fetch = async (u, o) => { const s = String(u); if (s.startsWith(url + '/auth/v1/admin/users/')) { const usr = sbUsers[s.split('/').pop()]; return new Response(JSON.stringify(usr || { msg: 'not found' }), { status: usr ? 200 : 404, headers: { 'content-type': 'application/json' } }); } return oldFetch(u, o); };
+    try {
+      const sb = (p, h = {}) => pub('GET', p, null, h);
+      const health = ok(await sb('/sb-api/health')); assert.equal(health.configured, true); assert.equal(health.secret_key, true); assert.ok(!JSON.stringify(health).includes('sb_secret_test123'));
+      assert.equal((await sb('/sb-api/me')).status, 401, 'no token');
+      assert.equal((await sb('/sb-api/me', { Authorization: 'Bearer ' + jwt({ sub: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test' }, nodeCrypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey) })).status, 401, 'token signed by another key');
+      assert.equal((await sb('/sb-api/me', { Authorization: 'Bearer ' + jwt({ sub: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test', iss: 'https://evil.supabase.co/auth/v1' }) })).status, 401, 'other project issuer');
+      const me = ok(await sb('/sb-api/me', { Authorization: 'Bearer ' + jwt({ sub: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test' }) }));
+      assert.equal(me.supabase.id, '11111111-1111-4111-8111-111111111111'); assert.equal(me.digitalhub.kind, 'merchant'); assert.equal(me.digitalhub.merchant.receiving_wallet.test, merchantWallet.address);
+      const un = await sb('/sb-api/payments', { Authorization: 'Bearer ' + jwt({ sub: '22222222-2222-4222-8222-222222222222', email: 'owner@northwind.test' }) }); assert.equal(un.status, 403, 'unconfirmed email cannot link');
+      const list = ok(await sb('/sb-api/payments?limit=50', { Authorization: 'Bearer ' + jwt({ sub: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test' }) })); assert.ok(list.data.some(p => p.id === pay.id));
+      assert.ok(list.data.every(p => store.get('payments', p.id).merchant_id === store.get('payments', pay.id).merchant_id), 'tenant scope');
+      assert.equal(ok(await sb('/sb-api/payments/' + pay.id, { Authorization: 'Bearer ' + jwt({ sub: '11111111-1111-4111-8111-111111111111', email: 'owner@northwind.test' }) })).id, pay.id);
+      assert.equal((await sb('/sb-api/overview', { apikey: 'sb_publishable_test123' })).status, 401, 'publishable key is not enough');
+      assert.equal((await sb('/sb-api/overview', { apikey: 'sb_secret_wrong' })).status, 401);
+      assert.ok(ok(await sb('/sb-api/overview', { apikey: 'sb_secret_test123' })).paid >= 4);
+    } finally { global.fetch = oldFetch; for (const k of ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'SUPABASE_JWKS']) process.env[k] = saved[k] ?? ''; }
   });
   await step('Ledger: every reconciliation check passes (incl. on-chain receipts, fees, no double credit)', async () => { const l = ok(await a('GET', '/a-api/ledger')); for (const c of l.checks) assert.ok(c.ok, c.name + ' — ' + c.detail); assert.ok(l.trial_balance.every(t => t.debits === t.credits)); });
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });

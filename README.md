@@ -132,6 +132,31 @@ on-chain transfer), `payment_links`, `events`, `webhook_endpoints`, `account`. K
 `crypto.payment.underpaid` · `crypto.payment.expired` · `refund.created` / `refund.succeeded` · `payment.refunded`.
 Webhooks carry `DigitalHub-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t + "." + body)>` and retry with backoff.
 
+## Supabase API (`/sb-api`)
+
+For apps that sign users in with **Supabase Auth**, and for backend services that hold a Supabase secret key. Built on
+[`@supabase/server`](https://github.com/supabase/server) core primitives. Credentials go in headers (no cookies): user
+tokens are verified against the project's JWKS with the issuer pinned to your project, and API keys are matched against
+the configured keys.
+
+| Endpoint | Auth | Returns |
+|---|---|---|
+| `GET /sb-api/health` | none | Supabase configuration status (never returns key values) |
+| `GET /sb-api/me` | `Authorization: Bearer <Supabase access token>` | Verified Supabase identity + linked Digital Hub account |
+| `GET /sb-api/payments?mode=test\|live&limit=` | Supabase user | The linked merchant's USDC payments |
+| `GET /sb-api/payments/{id}` | Supabase user | One payment, refreshed from the chain |
+| `GET /sb-api/overview?mode=` | `apikey: sb_secret_…` | Platform summary for server-to-server use |
+
+A Supabase user is linked to a Digital Hub merchant account only when the emails match **and** Supabase confirms the
+email (`email_confirmed_at`, checked with the secret key). Everything is tenant-scoped. Configure `SUPABASE_URL`,
+`SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` and `SUPABASE_JWKS_URL` in `.env` locally (git-ignored) and in the
+Vercel environment. **Never commit the secret key**: it bypasses Row Level Security.
+
+```bash
+curl https://YOUR-DOMAIN/sb-api/me -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN"
+curl https://YOUR-DOMAIN/sb-api/overview -H "apikey: $SUPABASE_SECRET_KEY"
+```
+
 ## Architecture
 
 ```
