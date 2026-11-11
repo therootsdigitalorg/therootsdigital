@@ -54,7 +54,7 @@ function barChart(series) {
     g += `<rect x="${x}" y="${yc}" width="${w}" height="${H - padB - yc}" fill="var(--accent)" rx="2"><title>${s.label}: card ${fmt(s.card, 'USD')}</title></rect>`;
     if (s.crypto) g += `<rect x="${x}" y="${yk}" width="${w}" height="${yc - yk}" fill="var(--warn)" rx="2"><title>${s.label}: crypto ${fmt(s.crypto, 'USD')}</title></rect>`;
     if (i % 2 === 0) g += `<text x="${x + w / 2}" y="${H - 8}" text-anchor="middle">${s.label}</text>`; });
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend">${series.some(s => s.card) ? '<span><i style="background:var(--accent)"></i>Card (legacy)</span>' : ''}<span><i style="background:var(--warn)"></i>USDC (MetaMask)</span><span>1 USDC = 1 USD</span></div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily successful volume">${g}</svg></div><div class="legend">${series.some(s => s.card) ? '<span><i style="background:var(--accent)"></i>Card</span>' : ''}<span><i style="background:var(--warn)"></i>${isStaff() ? 'USDC (MetaMask)' : 'Digital wallet'}</span><span>${isStaff() ? '1 USDC = 1 USD' : 'USD'}</span></div>`;
 }
 function balanceCards(bal) {
   const curs = Object.keys(bal || {}).sort((a, b) => (CRYPTO.includes(a) - CRYPTO.includes(b)) || a.localeCompare(b));

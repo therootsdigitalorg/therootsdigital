@@ -40,7 +40,7 @@ async function load() {
 }
 function route() {
   const s = st.s, p = s.payment;
-  if (!st.method || !s.methods.includes(st.method)) st.method = p?.method === 'card' ? 'card' : s.methods.includes('usdc') ? 'usdc' : s.methods[0];
+  if (!st.method || !s.methods.includes(st.method)) st.method = p?.method === 'usdc' ? 'usdc' : s.methods.includes('card') ? 'card' : s.methods[0]; // card first
   if (s.status === 'complete' || (p && ['confirmed', 'overpaid', 'partially_refunded', 'refunded', 'captured', 'authorized', 'settled'].includes(p.status))) st.step = 'done';
   else if (p && p.method === 'card' && p.status === 'requires_action') { st.step = '3ds'; st.method = 'card'; }
   else if (s.status === 'expired') st.step = 'expired';

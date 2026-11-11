@@ -134,7 +134,7 @@ async function launch() {
     assert.ok(mm.calls.includes('personal_sign')); await shot('merchant-wallet'); noErrors('wallet');
   });
   await step('Merchant: every page, tab and drawer renders without errors', async () => {
-    for (const r of ['home', 'payments', 'subscriptions', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'documents', 'settings', 'account']) await visit(r);
+    for (const r of ['home', 'payments', 'subscriptions', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'documents', 'settings', 'account']) { await visit(r); const words = await evaluate("(document.querySelector('#main').innerText.match(/USDC|MetaMask/g) || []).length"); assert.equal(words, 0, 'merchant page shows USDC/MetaMask wording: ' + r); }
     await evaluate(`location.hash = '#/home'`); await pageOk('home'); await shot('merchant-home'); noErrors('merchant pages');
   });
   await step('Merchant: create a payment link through the modal', async () => {
@@ -228,7 +228,7 @@ async function launch() {
     await evaluate(`(() => { const el = document.querySelector('[data-change=cardToggle]'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
     await waitFor(`/Card payments enabled/.test(document.body.innerText)`, 8000);
     const s = await fetch(BASE + '/v1/checkout/sessions', { method: 'POST', headers: { Authorization: 'Bearer ' + secretKey, 'content-type': 'application/json' }, body: JSON.stringify({ amount: 35000, currency: 'USD', description: 'Custom Packaging & Labeling Setup', customer_email: 'buyer@example.com' }) }).then(r => r.json());
-    await goto(BASE + '/pay/' + s.id); await waitFor(`!!document.querySelector('[data-method=card]')`, 8000, 'method tabs');
+    await goto(BASE + '/pay/' + s.id); await waitFor(`!!document.querySelector('[data-method=card]')`, 8000, 'method tabs'); assert.equal(await evaluate("document.querySelector('[data-method=card]').getAttribute('aria-pressed')"), 'true', 'card tab selected first'); assert.equal(await evaluate("document.querySelectorAll('.methods [data-method]')[0].dataset.method"), 'card', 'card tab listed first');
     await click('[data-method=card]'); await waitFor(`!!document.querySelector('#k-num')`); await shot('checkout-card');
     await evaluate(`document.querySelector('details').open = true`); await click('[data-tcard="4000000000003220"]');
     await evaluate(`(() => { document.getElementById('k-name').value = 'Rahman Buyer'; return true; })()`);

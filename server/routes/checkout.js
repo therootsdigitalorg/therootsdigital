@@ -67,8 +67,9 @@ function routes(r) {
     if (!core.linkActive(l)) return { html: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Link unavailable</title><body style="font-family:system-ui;padding:40px;text-align:center"><h1>This payment link is no longer active</h1><p>Ask the merchant for a new link.</p>`, status: 410 };
     const m = core.merchant(l.merchant_id);
     let s;
-    try { s = core.createSession(m, l.mode, { amount: l.amount, currency: l.currency, description: l.description, payment_methods: l.methods, link_id: l.id }, 'payment_link'); }
-    catch (e) { if (!(e instanceof HttpError) || e.status >= 500) throw e; return { html: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment unavailable</title><body style="font-family:system-ui;padding:40px;text-align:center"><h1>This payment link cannot take payments right now</h1><p>The merchant has not finished setting up USDC payments. Please contact them.</p>`, status: 409 }; }
+    const methods = [...new Set([...(l.methods || []), 'card', 'usdc'])].filter(x => core.methodAvailable(m, l.mode, x));
+    try { s = core.createSession(m, l.mode, { amount: l.amount, currency: l.currency, description: l.description, payment_methods: methods.length ? methods : l.methods, link_id: l.id }, 'payment_link'); }
+    catch (e) { if (!(e instanceof HttpError) || e.status >= 500) throw e; return { html: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment unavailable</title><body style="font-family:system-ui;padding:40px;text-align:center"><h1>This payment link cannot take payments right now</h1><p>The merchant has not finished setting up payments. Please contact them.</p>`, status: 409 }; }
     return { redirect: `/pay/${s.id}` };
   });
 

@@ -29,7 +29,8 @@ const DEFAULT = () => ({
   platformMode: 'sandbox', // 'sandbox' = only Base Sepolia; 'live' = Base Mainnet also available to live-enabled merchants
   feeWallet: null,
   networks: Object.fromEntries(Object.values(NETWORKS).map(n => [n.key, { enabled: n.key === 'base_sepolia', rpcUrls: [], wsUrl: '', usdc: n.usdc, ...n.defaults }])),
-  providers: { metamask_usdc: true, card: false, binance: false, coinbase: false, sandbox_crypto: false },
+  providers: { metamask_usdc: true, card_test: true, binance: false, coinbase: false, sandbox_crypto: false }, // card_test: sandbox test cards (never live)
+  infura: { key: '', secret: '', browserKey: '' }, // sealed; environment variables take precedence
 });
 /* Cached for a few seconds: settings are read many times per request and each read is a database round trip.
    A save on this instance updates the cache at once; other serverless instances pick it up within CACHE_MS. */
@@ -52,8 +53,10 @@ const net = key => { const n = NETWORKS[key]; if (!n) throw new U.HttpError(400,
 const unseal = v => { try { return U.unseal(v); } catch { return null; } };
 /* Infura (MetaMask's node service): set INFURA_API_KEY (and optionally INFURA_API_SECRET if "Require API key secret"
    is on) in the server environment. Keys never leave the server; the browser uses public endpoints only. */
-const infuraKey = () => String(process.env.INFURA_API_KEY || '').trim();
-const infuraSecret = () => String(process.env.INFURA_API_SECRET || '').trim();
+const infuraKey = () => String(process.env.INFURA_API_KEY || '').trim() || unseal(settings().infura?.key || '') || '';
+const infuraSecret = () => String(process.env.INFURA_API_SECRET || '').trim() || unseal(settings().infura?.secret || '') || '';
+function infuraBrowserKey() { return (() => String(process.env.INFURA_BROWSER_KEY || '').trim() || settings().infura?.browserKey || '')(); }
+const infuraSource = () => process.env.INFURA_API_KEY ? 'environment' : settings().infura?.key ? 'admin settings' : null;
 const infuraHttp = key => infuraKey() ? `https://${NETWORKS[key].infura}.infura.io/v3/${infuraKey()}` : null;
 const infuraWs = key => infuraKey() ? `wss://${NETWORKS[key].infura}.infura.io/ws/v3/${infuraKey()}` : null;
 const isInfura = url => /\.infura\.io\//.test(url);
@@ -66,7 +69,20 @@ function rpcUrls(key) {
 }
 function wsUrl(key) { return process.env[NETWORKS[key].envWs] || infuraWs(key) || unseal(settings().networks[key].wsUrl || '') || ''; }
 const rpcSource = key => envList(NETWORKS[key].envRpc).length ? 'environment (' + NETWORKS[key].envRpc + ')' : [infuraKey() && 'Infura (INFURA_API_KEY)', (settings().networks[key].rpcUrls || []).length && 'admin settings', 'public Base endpoint (fallback)'].filter(Boolean).join(' → ');
-function infuraStatus() { return { configured: !!infuraKey(), secret: !!infuraSecret(), networks: Object.fromEntries(Object.keys(NETWORKS).map(k => [k, infuraKey() ? { http: mask(infuraHttp(k)), ws: mask(infuraWs(k)) } : null])) }; }
+/** Check a key against Infura before saving: Base Sepolia must answer chain 84532. */
+async function testInfura(key, secret) {
+  const headers = { 'content-type': 'application/json' }; if (secret) headers.authorization = 'Basic ' + Buffer.from(':' + secret).toString('base64');
+  const out = {};
+  for (const k of Object.keys(NETWORKS)) {
+    try {
+      const r = await fetch(`https://${NETWORKS[k].infura}.infura.io/v3/${key}`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(10000) });
+      const text = await r.text(); let j = null; try { j = JSON.parse(text); } catch {}
+      out[k] = r.ok && j?.result && Number(E.fromHexQty(j.result)) === NETWORKS[k].chainId ? { ok: true } : { ok: false, error: `HTTP ${r.status}: ${(j?.error?.message || text || '').slice(0, 120)}` };
+    } catch (e) { out[k] = { ok: false, error: e.message }; }
+  }
+  return out;
+}
+function infuraStatus() { return { configured: !!infuraKey(), source: infuraSource(), secret: !!infuraSecret(), browser_key: !!infuraBrowserKey(), networks: Object.fromEntries(Object.keys(NETWORKS).map(k => [k, infuraKey() ? { http: mask(infuraHttp(k)), ws: mask(infuraWs(k)) } : null])) }; }
 /** Hide keys/paths: https://base-sepolia.g.alchemy.com/v2/abc123 → https://base-sepolia.g.alchemy.com/… */
 function mask(url) { try { const u = new URL(url); return `${u.protocol}//${u.host}${u.pathname.length > 1 || u.search ? '/…' : ''}`; } catch { return 'invalid URL'; } }
 
@@ -76,7 +92,7 @@ function walletParams(key) {
   return { key: n.key, chainId: n.chainId, chainIdHex: '0x' + n.chainId.toString(16), chainName: n.name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
     rpcUrls: n.publicRpc, blockExplorerUrls: [n.explorer], usdc: n.usdc, usdcDecimals: E.USDC_DECIMALS, testnet: n.testnet, faucet: n.faucet || null,
     // read RPC for the MetaMask Connect SDK: an origin-restricted Infura key meant for browsers (never INFURA_API_KEY), else public
-    sdkRpcUrl: process.env.INFURA_BROWSER_KEY ? `https://${n.infura}.infura.io/v3/${String(process.env.INFURA_BROWSER_KEY).trim()}` : n.publicRpc[0] };
+    sdkRpcUrl: infuraBrowserKey() ? `https://${n.infura}.infura.io/v3/${infuraBrowserKey()}` : n.publicRpc[0] };
 }
 const explorerTx = (key, h) => `${NETWORKS[key].explorer}/tx/${h}`;
 const explorerAddr = (key, a) => `${NETWORKS[key].explorer}/address/${a}`;
@@ -223,5 +239,5 @@ async function productionChecks({ live = true } = {}) {
   return { checks, ready: checks.filter(c => c.required).every(c => c.ok) };
 }
 
-module.exports = { infuraStatus, NETWORKS, FINALITY, networkFor, settings, saveSettings, net, rpcUrls, wsUrl, rpcSource, mask, walletParams, explorerTx, explorerAddr,
+module.exports = { infuraStatus, testInfura, NETWORKS, FINALITY, networkFor, settings, saveSettings, net, rpcUrls, wsUrl, rpcSource, mask, walletParams, explorerTx, explorerAddr,
   rpc, blockNumber, getReceipt, getTx, getLogs, getLogsRange, finalHead, verifyToken, probe, healthView, rpcErrors, subscribeHeads, stopSockets, socketView, productionChecks };

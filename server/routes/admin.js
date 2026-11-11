@@ -406,9 +406,21 @@ function routes(r) {
     const s = C.settings(), t = await C.verifyToken(key, s.networks[key].usdc); s.tokenChecks = { ...(s.tokenChecks || {}), [key]: t }; C.saveSettings(s);
     return { rpcs: await C.probe(key), token: t }; });
   A('PATCH', '/chain', 'platform.settings', (ctx, c) => { const s = C.settings(), b = ctx.body;
-    if (b.card_sandbox !== undefined) s.providers = { ...s.providers, card: !!b.card_sandbox }; // sandbox test cards only; live cards stay off without an acquirer
+    if (b.card_sandbox !== undefined) s.providers = { ...s.providers, card_test: !!b.card_sandbox }; // sandbox test cards only; live cards stay off without an acquirer
     if (b.fee_wallet !== undefined) { const a = b.fee_wallet ? E.normalizeAddress(b.fee_wallet) : null; if (b.fee_wallet && !a) throw bad('Fee treasury wallet must be a valid address.'); s.feeWallet = a; }
     C.saveSettings(s); core.audit(c.actor, 'chain.settings_update', 'chain', Object.keys(b).join(',')); return { ok: true, fee_wallet: s.feeWallet }; });
+  A('POST', '/chain/infura', 'platform.settings', async (ctx, c) => {
+    const s = C.settings(), b = ctx.body;
+    if (b.remove) { s.infura = { key: '', secret: '', browserKey: '' }; C.saveSettings(s); core.audit(c.actor, 'chain.infura_removed', 'infura', ''); return { ok: true, infura: C.infuraStatus() }; }
+    const key = String(b.api_key || '').trim(), secret = String(b.api_secret || '').trim(), browserKey = String(b.browser_key || '').trim();
+    if (!/^[0-9a-f]{32}$/i.test(key)) throw bad('An Infura API key is 32 hexadecimal characters (developer.metamask.io → API keys → copy the key).', 'infura_key_invalid');
+    if (browserKey && browserKey === key) throw bad('Use a separate, domain-restricted key for browsers — never the server key.');
+    const test = await C.testInfura(key, secret);
+    if (!test.base_sepolia.ok) throw bad(`Infura did not accept this key for Base Sepolia (${test.base_sepolia.error}). In Infura, open the key → "All Endpoints" and enable Base Sepolia and Base Mainnet; if "Require API key secret" is on, paste the secret too.`, 'infura_rejected');
+    s.infura = { key: U.seal(key), secret: secret ? U.seal(secret) : '', browserKey }; C.saveSettings(s);
+    core.audit(c.actor, 'chain.infura_saved', 'infura', `sepolia ok, mainnet ${test.base.ok ? 'ok' : 'failed'}`);
+    return { ok: true, test, infura: C.infuraStatus(), env_override: !!process.env.INFURA_API_KEY };
+  });
   A('GET', '/chain/production-checks', null, async () => C.productionChecks({ live: true }));
   /** API diagnostics: one call that answers "is everything healthy?" — no secret values. */
   A('GET', '/diagnostics', null, async (ctx, c) => {

@@ -95,7 +95,7 @@ function methodAvailable(m, mode, method) {
     if (mode === 'live' && chain.settings().platformMode !== 'live') return false;
     return !!require('./usdc').receivingWallet(m, mode);
   }
-  if (method === 'card') return !!prov.card && m.perms.card && mode === 'test'; // sandbox test cards only; live cards need a connected acquirer (hosted fields)
+  if (method === 'card') return prov.card_test !== false && m.perms.card && mode === 'test'; // sandbox test cards only, no approval needed; live cards need a connected acquirer (hosted fields)
   if (!(prov.binance || prov.coinbase || prov.sandbox_crypto)) return false;
   if (!m.perms.crypto) return false;
   if (mode === 'test') return cryptoOptions(m).length > 0;
@@ -177,10 +177,11 @@ function createSession(m, mode, input, actor = 'api') {
   if (amount > 100000000) throw bad('amount is too large.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   for (const k of ['success_url', 'cancel_url']) if (input[k] && !U.isUrl(input[k])) throw bad(`${k} must be an http(s) URL.`, 'url_invalid');
-  let methods = [].concat(input.payment_methods || input.methods || ['usdc', 'card']).map(String).filter(x => METHODS.includes(x));
+  let methods = [].concat(input.payment_methods || input.methods || ['card', 'usdc']).map(String).map(x => x === 'wallet' ? 'usdc' : x).filter(x => METHODS.includes(x)); // 'wallet' = alias of 'usdc'
+  methods.sort((a, b) => (a === 'card' ? -1 : 0) - (b === 'card' ? -1 : 0)); // card is offered first at checkout
   methods = methods.filter(x => methodAvailable(m, mode, x));
   if (currency !== 'USD' && methods.includes('usdc') && methods.some(x => x !== 'usdc')) methods = methods.filter(x => x !== 'usdc');
-  if (!methods.length) throw bad(require('./usdc').receivingWallet(m, mode) || mode === 'live' ? 'No requested payment method is available for this account in this mode. This platform accepts USDC via MetaMask (payment_methods: ["usdc"]).' : 'USDC checkout needs a verified receiving wallet: Dashboard → Receiving wallet → verify with MetaMask.', 'no_payment_method');
+  if (!methods.length) throw bad(mode === 'live' ? 'No payment method is available for this account in live mode yet.' : 'No payment method is available: verify a receiving wallet (Dashboard → Receiving wallet), or ask Digital Hub to enable test cards.', 'no_payment_method');
   if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC checkout is priced in USD (1 USDC = 1 USD, no conversion). Use currency USD.', 'currency_unsupported');
   const block = controlCheck(m, mode, amount, currency, null); if (block) throw bad(block, 'limit_exceeded');
   const metadata = {}; for (const [k, v] of Object.entries(input.metadata || {}).slice(0, 20)) metadata[U.str(k, 40)] = U.str(v, 500);
@@ -197,7 +198,7 @@ function createLink(m, mode, input, actor) {
   if (!Number.isInteger(amount) || amount < 50) throw bad('amount must be an integer in minor units, at least 50.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   const description = U.str(input.description, 200); if (!description) throw bad('description is required.');
-  const methods = [].concat(input.payment_methods || ['usdc', 'card']).filter(x => METHODS.includes(x));
+  const methods = [].concat(input.payment_methods || ['card', 'usdc']).map(String).map(x => x === 'wallet' ? 'usdc' : x).filter(x => METHODS.includes(x));
   if (!methods.length) throw bad('Choose at least one payment method.');
   if (methods.length === 1 && methods[0] === 'usdc' && currency !== 'USD') throw bad('USDC payment links are priced in USD.', 'currency_unsupported');
   const days = Number(input.expires_in_days || 0);

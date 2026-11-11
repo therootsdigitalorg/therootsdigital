@@ -61,7 +61,15 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     ok(await m('POST', '/auth/login', { email: 'owner@northwind.test', password: merchantPw }));
   });
   await step('Seed invents no payments or balances', async () => { const o = ok(await m('GET', '/m-api/overview')); assert.equal(o.count, 0); assert.equal(o.direct.received, 0); assert.equal(o.wallet, null); });
-  await step('Checkout is refused until the merchant verifies a receiving wallet', async () => { await assert.rejects(dh.checkout.create({ amount: 2500, currency: 'USD', payment_methods: ['usdc'] }), /verified receiving wallet/); });
+  await step('Sandbox works without approval or wallet: test card offered first; wallet payments wait for a verified wallet', async () => {
+    await assert.rejects(dh.checkout.create({ amount: 2500, currency: 'USD', payment_methods: ['usdc'] }), /No payment method is available/);
+    const s = await dh.checkout.create({ amount: 2500, currency: 'USD' }); assert.deepEqual(s.payment_methods, ['card'], 'test cards on by default');
+    const indus = store.list('merchants', {}).find(x => x.name === 'Indus Crafts'); assert.equal(indus.status, 'pending');
+    const si = core.createSession(indus, 'test', { amount: 1500, currency: 'USD', description: 'Unapproved merchant sandbox' }, 'test'); assert.deepEqual(si.methods, ['card']);
+    const pi = core.cardPay(si, { number: '4242424242424242', exp: '12/34', cvc: '123', name: 'Test Buyer', email: 'buyer@example.com' }); assert.equal(pi.status, 'captured', 'pending (unapproved) merchant takes sandbox card payments');
+    const l = ok(await m('POST', '/m-api/links', { amount: 1900, currency: 'USD', description: 'Link before wallet', payment_methods: ['usdc'] }));
+    const r = await pub('GET', new URL(l.url).pathname); assert.equal(r.status, 303, 'payment link falls back to the available test card');
+  });
   let wal;
   await step('Wallet: invalid / checksum-broken addresses rejected', async () => {
     assert.equal((await m('POST', '/m-api/wallets', { address: '0x1234' })).status, 400);
@@ -90,7 +98,7 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     assert.deepEqual(session.payment_methods, ['usdc']);
     assert.equal((await dh.checkout.create({ amount: 2500, currency: 'USD', description: 'Order #42', payment_methods: ['usdc'], metadata: { order_id: '42', site: 'https://shop.test' }, customer_email: 'ann@example.com' }, { idempotencyKey: 'order-42' })).id, session.id);
     await assert.rejects(dh.checkout.create({ amount: 2500, currency: 'EUR', payment_methods: ['usdc'] }), /priced in USD/);
-    await assert.rejects(dh.checkout.create({ amount: 2500, currency: 'USD', payment_methods: ['card'] }), /No requested payment method/);
+    assert.deepEqual((await dh.checkout.create({ amount: 2500, currency: 'USD', payment_methods: ['card', 'wallet'] })).payment_methods, ['card', 'usdc'], "'wallet' is an alias of usdc; card first");
   });
   await step('Checkout page serves MetaMask checkout; view exposes Base Sepolia + verified USDC + merchant wallet', async () => {
     const page = await fetch(BASE + `/pay/${session.id}`); assert.equal(page.status, 200); const html = await page.text(); assert.match(html, /checkout\.js/); assert.match(html, /metamask\.js/);
@@ -387,10 +395,11 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
   /* ---------------- sandbox cards ---------------- */
   const cardIn = (s, number, extra = {}) => pub('POST', `/c-api/sessions/${s}/card`, { number, exp: '12/34', cvc: '123', name: 'Cara Card', email: 'cara@example.com', country: 'US', ...extra });
   let cardPayment;
-  await step('Cards: off by default; admin switches on sandbox cards; checkout offers USDC + Card with test cards', async () => {
+  await step('Cards: on by default in test mode (card first); admin can switch them off and on; test cards offered', async () => {
+    ok(await a('PATCH', '/a-api/chain', { card_sandbox: false })); await new Promise(r => setTimeout(r, 50));
     const s0 = await dh.checkout.create({ amount: 1000, currency: 'USD' }); assert.deepEqual(s0.payment_methods, ['usdc']);
     ok(await a('PATCH', '/a-api/chain', { card_sandbox: true }));
-    const s1 = await dh.checkout.create({ amount: 35000, currency: 'USD', description: 'Packaging setup', metadata: { order_id: '901' } }); assert.deepEqual(s1.payment_methods, ['usdc', 'card']);
+    const s1 = await dh.checkout.create({ amount: 35000, currency: 'USD', description: 'Packaging setup', metadata: { order_id: '901' } }); assert.deepEqual(s1.payment_methods, ['card', 'usdc']);
     const v = ok(await pub('GET', `/c-api/sessions/${s1.id}`)); assert.equal(v.card.sandbox, true); assert.ok(v.card.test_cards.length >= 5);
     assert.equal((await cardIn(s1.id, '4111111111111111')).body.error.code, 'test_card_required', 'real card numbers refused');
     const r = ok(await cardIn(s1.id, '4242424242424242')); assert.equal(r.status, 'captured'); cardPayment = r;
@@ -478,6 +487,20 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     assert.ok(ok(await a('GET', '/a-api/audit?q=status_approved_with_exceptions')).some(e => e.target === sol.id));
     assert.equal(ok(await a('GET', '/a-api/merchants?q=Solvexs'))[0].approved_with_exceptions, true);
   });
+  await step('Infura connects from Super Admin: key tested against Base, saved encrypted, used first; bad key refused', async () => {
+    const C = require('../server/chain'), oldFetch = global.fetch, saved = process.env.BASE_SEPOLIA_RPC_URLS, good = 'a'.repeat(32);
+    global.fetch = async (u, o) => { const s = String(u); if (!s.includes('.infura.io/')) return oldFetch(u, o); const ok_ = s.endsWith('/' + good); const net = s.includes('base-sepolia') ? '0x14a34' : '0x2105';
+      return new Response(JSON.stringify(ok_ ? { jsonrpc: '2.0', id: 1, result: net } : { jsonrpc: '2.0', id: 1, error: { code: -32002, message: 'invalid project id' } }), { status: ok_ ? 200 : 401 }); };
+    try {
+      assert.equal((await a('POST', '/a-api/chain/infura', { api_key: 'nope' })).body.error.code, 'infura_key_invalid');
+      assert.equal((await a('POST', '/a-api/chain/infura', { api_key: 'b'.repeat(32) })).body.error.code, 'infura_rejected');
+      const r = ok(await a('POST', '/a-api/chain/infura', { api_key: good })); assert.equal(r.test.base_sepolia.ok, true); assert.equal(r.infura.source, 'admin settings');
+      assert.ok(!JSON.stringify(store.getMeta('chain')).includes(good), 'stored encrypted');
+      delete process.env.BASE_SEPOLIA_RPC_URLS; assert.equal(C.rpcUrls('base_sepolia')[0], 'https://base-sepolia.infura.io/v3/' + good);
+      assert.ok(!JSON.stringify(ok(await a('GET', '/a-api/chain'))).includes(good), 'never returned to the browser');
+      ok(await a('POST', '/a-api/chain/infura', { remove: true })); assert.equal(C.infuraStatus().configured, false);
+    } finally { global.fetch = oldFetch; process.env.BASE_SEPOLIA_RPC_URLS = saved; }
+  });
   await step('MetaMask & Blockchain: Infura first with public failover, keys masked; diagnostics; SDK self-hosted', async () => {
     const C = require('../server/chain'), saved = process.env.BASE_SEPOLIA_RPC_URLS;
     try {
@@ -494,7 +517,7 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
   await step('Diagnostics: /api/health reports setup without leaking secrets', async () => { const h = ok(await pub('GET', '/api/health')); assert.equal(h.ok, true); assert.equal(h.database.schema_version, null === h.database.schema_version ? null : h.database.schema_version); assert.ok(h.database.users >= 1); const s = JSON.stringify(h); assert.ok(!s.includes(secret) && !s.includes('AdminPass12345')); });
   await step('Security headers: CSP allows MetaMask Connect only from pinned hosts', async () => { const r = await fetch(BASE + '/app'); const csp = r.headers.get('content-security-policy'); assert.doesNotMatch(csp, /cdn\.jsdelivr\.net/, 'MetaMask Connect is self-hosted'); assert.match(csp, /wss:\/\/\*\.metamask\.io/); const sdk = await fetch(BASE + '/vendor/mm-connect/connect-evm.js'); assert.equal(sdk.status, 200); assert.match(await sdk.text(), /createEVMClient/); assert.match(csp, /frame-ancestors 'none'/); });
-  await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['usdc', 'card']")); });
+  await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['card', 'wallet']")); assert.ok(!/USDC \(MetaMask\)'\]|Pay with USDC/.test(b.toString('latin1').replace("'USDC (MetaMask)'];", '')), 'plugin shows card / wallet in USD'); });
 
   console.log(`\n${passed} checks passed${failed ? `, ${failed} FAILED` : ''}.`);
   receiver.close(); server.close(); sepolia.server.close(); mainnet.server.close(); wrongChain.server.close(); setTimeout(() => process.exit(), 100);

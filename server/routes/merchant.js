@@ -34,8 +34,8 @@ function onboarding(m) {
     { key: 'mfa', label: 'Two-factor authentication on the owner account', done: !!owner?.mfa_enabled, detail: 'Required for payouts and live keys.' },
     { key: 'api_key', label: 'Create a test API key', done: store.list('api_keys', { merchant_id: m.id, mode: 'test' }).some(k => k.type === 'secret'), detail: 'Developers → API keys.' },
     { key: 'webhook', label: 'Add a webhook endpoint', done: any('webhook_endpoints', {}), detail: 'Signed events to your server or plugin.' },
-    { key: 'wallet', label: 'Receiving wallet verified with MetaMask', done: !!usdc.receivingWallet(m, 'test'), detail: 'Receiving wallet → add your Base address and sign the ownership message.' },
-    { key: 'test_payment', label: 'Complete a Base Sepolia test payment', done: store.list('payments', { merchant_id: m.id, mode: 'test', status: core.PAID }, { limit: 1 }).length > 0, detail: 'Open a payment link and pay with test USDC from MetaMask (faucet.circle.com).' },
+    { key: 'wallet', label: 'Receiving wallet verified', done: !!usdc.receivingWallet(m, 'test'), detail: 'Receiving wallet → add your wallet address and sign the free ownership message.' },
+    { key: 'test_payment', label: 'Complete a test payment', done: store.list('payments', { merchant_id: m.id, mode: 'test', status: core.PAID }, { limit: 1 }).length > 0, detail: 'Open a payment link and pay with test card 4242 4242 4242 4242.' },
     { key: 'wallet_live', label: 'Wallet approved by Digital Hub compliance', done: store.list('merchant_wallets', { merchant_id: m.id, status: 'approved' }, { limit: 1 }).length > 0, detail: 'Required before Base Mainnet payments.' },
     { key: 'live', label: 'Live mode activated', done: !core.liveReady(m), detail: core.liveReady(m) || 'Live payments enabled.' },
   ];

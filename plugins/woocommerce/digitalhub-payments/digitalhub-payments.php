@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:       Digital Hub Payments for WooCommerce
- * Description:       Accept USDC on Base with MetaMask through Digital Hub hosted checkout. Funds go straight to your verified wallet.
- * Version:           2.0.0
+ * Description:       Accept card and digital-wallet payments in USD through the Digital Hub hosted checkout.
+ * Version:           2.1.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('DIGITALHUB_WC_VERSION', '2.0.0');
+define('DIGITALHUB_WC_VERSION', '2.1.0');
 define('DIGITALHUB_WC_FILE', __FILE__);
 
 add_action('before_woocommerce_init', function () {
@@ -31,31 +31,33 @@ add_action('plugins_loaded', function () {
     }
 
     /**
-     * USDC via MetaMask. The order is marked paid only from Digital Hub's signed webhook (or the return-page
-     * status check), and Digital Hub sends that only after verifying the USDC transfer on Base: chain, token
+     * Card or digital-wallet payment in USD. The order is marked paid only from Digital Hub's signed webhook (or the
+     * return-page status check), and Digital Hub sends that only after the card is authorised or the wallet transfer is verified: chain, token
      * contract, recipient wallet, sender, amount and confirmations.
      */
     class WC_Gateway_DigitalHub extends WC_Payment_Gateway
     {
         const SUPPORTED = ['USD'];
-        const OLD_TITLES = ['Card or USDT / USDC', 'Visa / Mastercard'];
+        const OLD_TITLES = ['Card or USDT / USDC', 'Visa / Mastercard', 'USDC (MetaMask)'];
+        const DEFAULT_TITLE = 'Card or Digital Wallet (USD)';
+        const DEFAULT_DESCRIPTION = 'Pay securely in USD by card or digital wallet.';
 
         public function __construct()
         {
             $this->id                 = 'digitalhub';
-            $this->method_title       = 'Digital Hub · USDC (MetaMask)';
-            $this->method_description = 'USDC on Base via MetaMask. Customers pay on the Digital Hub hosted checkout; USDC goes directly to your verified wallet. Store currency must be USD (1 USDC = 1 USD).';
+            $this->method_title       = 'Digital Hub';
+            $this->method_description = 'Card and digital-wallet payments in USD. Customers pay on the secure Digital Hub hosted checkout. Store currency must be USD.';
             $this->has_fields         = false;
             $this->supports           = ['products', 'refunds'];
             $this->init_form_fields();
             $this->init_settings();
             $this->title = $this->get_option('title');
             if (in_array($this->title, self::OLD_TITLES, true) || $this->title === '') {
-                $this->title = 'USDC (MetaMask)';
+                $this->title = self::DEFAULT_TITLE;
             }
             $this->description = $this->get_option('description');
-            if (stripos($this->description, 'Mastercard') !== false || $this->description === '') {
-                $this->description = 'Pay with USDC from your MetaMask wallet on Base.';
+            if (stripos($this->description, 'Mastercard') !== false || stripos($this->description, 'MetaMask') !== false || $this->description === '') {
+                $this->description = self::DEFAULT_DESCRIPTION;
             }
             $this->enabled = $this->get_option('enabled');
 
@@ -67,18 +69,18 @@ add_action('plugins_loaded', function () {
         public function init_form_fields()
         {
             $this->form_fields = [
-                'enabled'         => ['title' => 'Enable', 'type' => 'checkbox', 'label' => 'Enable USDC (MetaMask) via Digital Hub', 'default' => 'no'],
-                'title'           => ['title' => 'Title', 'type' => 'text', 'default' => 'USDC (MetaMask)'],
-                'description'     => ['title' => 'Description', 'type' => 'textarea', 'default' => 'Pay with USDC from your MetaMask wallet on Base.'],
+                'enabled'         => ['title' => 'Enable', 'type' => 'checkbox', 'label' => 'Enable Digital Hub payments (card and digital wallet, USD)', 'default' => 'no'],
+                'title'           => ['title' => 'Title', 'type' => 'text', 'default' => 'Card or Digital Wallet (USD)'],
+                'description'     => ['title' => 'Description', 'type' => 'textarea', 'default' => 'Pay securely in USD by card or digital wallet.'],
                 'api_base'        => ['title' => 'Digital Hub URL', 'type' => 'text', 'description' => 'For example https://pay.yourdomain.com (no trailing slash).', 'default' => ''],
-                'test_mode'       => ['title' => 'Test mode', 'type' => 'checkbox', 'label' => 'Use the test secret key (Base Sepolia testnet, no real money)', 'default' => 'yes'],
+                'test_mode'       => ['title' => 'Test mode', 'type' => 'checkbox', 'label' => 'Use the test secret key (test cards, no real money)', 'default' => 'yes'],
                 'test_secret_key' => ['title' => 'Test secret key', 'type' => 'password', 'description' => 'dh_test_sk_… from Developers → API keys'],
-                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (Base mainnet, available after go-live)'],
+                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (available after go-live)'],
                 'webhook_secret'  => ['title' => 'Webhook signing secret', 'type' => 'password', 'description' => 'Create a webhook endpoint in Digital Hub with URL <code>' . esc_html(home_url('/wc-api/digitalhub/')) . '</code> and paste its whsec_… secret here.'],
             ];
         }
 
-        /** Only offered when the store prices in USD — USDC is settled 1:1 with no currency conversion. */
+        /** Only offered when the store prices in USD. */
         public function is_available()
         {
             if (!parent::is_available()) {
@@ -125,7 +127,7 @@ add_action('plugins_loaded', function () {
             try {
                 $currency = $order->get_currency();
                 if (!in_array($currency, self::SUPPORTED, true)) {
-                    throw new Exception('USDC checkout requires the order to be priced in USD.');
+                    throw new Exception('Digital Hub checkout requires the order to be priced in USD.');
                 }
                 $amount  = self::minor($order->get_total());
                 $session = $this->api('POST', '/checkout/sessions', [
@@ -133,14 +135,14 @@ add_action('plugins_loaded', function () {
                     'currency'        => $currency,
                     'description'     => sprintf('Order #%s – %s', $order->get_order_number(), get_bloginfo('name')),
                     // Digital Hub offers only the methods switched on for this account (card = sandbox test cards for now)
-                    'payment_methods' => ['usdc', 'card'],
+                    'payment_methods' => ['card', 'wallet'],
                     'customer_email'  => $order->get_billing_email(),
                     'metadata'        => ['order_id' => (string) $order->get_id(), 'order_key' => $order->get_order_key(), 'site' => home_url()],
                     'success_url'     => $this->get_return_url($order),
                     'cancel_url'      => $order->get_cancel_order_url_raw(),
                 ], 'wc_' . $order->get_id() . '_' . $amount . '_' . $currency);
                 $order->update_meta_data('_digitalhub_session', $session['id']);
-                $order->update_status('pending', 'Redirected to Digital Hub USDC checkout ' . $session['id']);
+                $order->update_status('pending', 'Redirected to Digital Hub checkout ' . $session['id']);
                 $order->save();
                 return ['result' => 'success', 'redirect' => $session['url']];
             } catch (Exception $e) {
@@ -187,7 +189,7 @@ add_action('plugins_loaded', function () {
             }
             if ($session['status'] === 'complete' && $session['payment_status'] === 'paid') {
                 $order->payment_complete($session['payment']);
-                $order->add_order_note('Digital Hub: USDC payment verified on-chain — ' . $session['payment'] . ($session['livemode'] ? ' (Base)' : ' (Base Sepolia TEST)'));
+                $order->add_order_note('Digital Hub: payment confirmed — ' . $session['payment'] . ($session['livemode'] ? '' : ' (TEST)'));
             }
         }
 
@@ -203,9 +205,9 @@ add_action('plugins_loaded', function () {
                 $tx   = isset($last['hash']) ? $last['hash'] : '';
             }
             if ($order->has_status('pending')) {
-                $order->update_status('on-hold', 'Digital Hub: USDC transfer detected' . ($tx ? ' (' . $tx . ')' : '') . ' — waiting for on-chain confirmations.');
+                $order->update_status('on-hold', 'Digital Hub: wallet payment received' . ($tx ? ' (' . $tx . ')' : '') . ' — waiting for confirmation.');
             } else {
-                $order->add_order_note('Digital Hub: USDC transfer detected' . ($tx ? ' (' . $tx . ')' : '') . '.');
+                $order->add_order_note('Digital Hub: wallet payment received' . ($tx ? ' (' . $tx . ')' : '') . '.');
             }
         }
 
@@ -215,7 +217,7 @@ add_action('plugins_loaded', function () {
                 return;
             }
             if ($order->has_status(['pending', 'on-hold'])) {
-                $order->update_status('cancelled', 'Digital Hub: checkout expired without a verified USDC payment.');
+                $order->update_status('cancelled', 'Digital Hub: checkout expired without a confirmed payment.');
             }
         }
 
@@ -238,7 +240,7 @@ add_action('plugins_loaded', function () {
             if ($refunded > $local_refunded) {
                 $result = wc_create_refund([
                     'amount'         => ($refunded - $local_refunded) / 100,
-                    'reason'         => 'Digital Hub USDC refund verified on-chain',
+                    'reason'         => 'Digital Hub refund',
                     'order_id'       => $order->get_id(),
                     'refund_payment' => false,
                     'restock_items'  => false,
@@ -251,9 +253,9 @@ add_action('plugins_loaded', function () {
             $order = wc_get_order($order->get_id());
             $order->update_meta_data('_digitalhub_refunded', $refunded);
             if ($refunded === $order_total && !$order->has_status('refunded')) {
-                $order->update_status('refunded', 'Digital Hub: USDC payment fully refunded (verified on-chain).');
+                $order->update_status('refunded', 'Digital Hub: payment fully refunded.');
             } else {
-                $order->add_order_note(sprintf('Digital Hub: payment %s refunded total %s USDC (verified on-chain).', $payment['id'], number_format($refunded / 100, 2)));
+                $order->add_order_note(sprintf('Digital Hub: payment %s refunded total %s USD.', $payment['id'], number_format($refunded / 100, 2)));
             }
             $order->save();
         }
@@ -290,7 +292,7 @@ add_action('plugins_loaded', function () {
             } elseif ($type === 'payment.refunded') {
                 $this->sync_refund_from_payment($order, $obj);
             } elseif ($type === 'crypto.payment.underpaid' && $order) {
-                $order->add_order_note('Digital Hub: customer sent less USDC than due. The order stays unpaid until the rest arrives or you accept the partial payment in Digital Hub.');
+                $order->add_order_note('Digital Hub: the customer paid less than due. The order stays unpaid until the rest arrives or you accept the partial payment in Digital Hub.');
             }
             status_header(200);
             exit('ok');
@@ -311,8 +313,8 @@ add_action('plugins_loaded', function () {
         }
 
         /**
-         * USDC refunds are non-custodial: Digital Hub cannot move your funds. This creates a refund request; you send the USDC
-         * from your receiving wallet with MetaMask (Digital Hub → Refunds). WooCommerce records the refund automatically when
+         * Card refunds complete immediately. Wallet refunds are non-custodial: Digital Hub cannot move your funds, so this creates
+         * a refund request you send from your receiving wallet (Digital Hub → Refunds); WooCommerce records it automatically when
          * the transfer is verified on-chain (payment.refunded webhook). Returning an error here prevents WooCommerce from
          * recording a refund that has not happened yet.
          */
@@ -330,8 +332,12 @@ add_action('plugins_loaded', function () {
                 }
                 $idempotency_key = 'wc_refund_' . $order_id . '_' . (isset($body['amount']) ? $body['amount'] : 'full') . '_' . self::minor($order->get_total_refunded());
                 $refund = $this->api('POST', '/refunds', $body, $idempotency_key);
-                $order->add_order_note(sprintf('Digital Hub refund request %s for %s USDC created (status: %s). Send it from your receiving wallet with MetaMask in Digital Hub → Refunds.', $refund['id'], number_format($refund['amount'] / 100, 2), $refund['status']));
-                return new WP_Error('digitalhub_refund_pending', sprintf('Refund request %s created. Open Digital Hub → Refunds and click "Send with MetaMask". WooCommerce will record the refund automatically once the USDC transfer is verified on-chain.', $refund['id']));
+                if ($refund['status'] === 'succeeded') { // card refunds complete immediately
+                    $order->add_order_note(sprintf('Digital Hub refund %s: %s USD refunded.', $refund['id'], number_format($refund['amount'] / 100, 2)));
+                    return true;
+                }
+                $order->add_order_note(sprintf('Digital Hub refund request %s for %s USD created (status: %s). Send it from your receiving wallet in Digital Hub → Refunds.', $refund['id'], number_format($refund['amount'] / 100, 2), $refund['status']));
+                return new WP_Error('digitalhub_refund_pending', sprintf('Refund request %s created. Open Digital Hub → Refunds and click "Send from wallet". WooCommerce will record the refund automatically once it is confirmed.', $refund['id']));
             } catch (Exception $e) {
                 return new WP_Error('digitalhub_refund', $e->getMessage());
             }
