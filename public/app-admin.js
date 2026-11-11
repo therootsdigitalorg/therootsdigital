@@ -36,7 +36,7 @@ VIEWS['a-merchants'] = async () => {
   return head('Super admin', 'Merchants', 'Verification, controls, fees, receiving wallets, API access and live activation for every merchant account.', can('merchants.manage') ? '<button class="btn primary" data-act="newMerchant">New merchant</button>' : '')
     + mfaWarn() + `<div class="card"><div class="grid g3">${fInput('am', 'q', 'Search', 'Name, website, ID, email')}${fSelect('am', 'status', 'Status', [['', 'All'], ['pending', 'Pending'], ['approved', 'Approved'], ['suspended', 'Suspended'], ['rejected', 'Rejected']])}<div class="field"><span>Total</span><div class="num" style="padding:8px 0">${rows.length} merchants</div></div></div></div>`
     + table([{ h: 'Merchant', v: m => `<b>${esc(m.name)}</b><div class="faint" style="font-size:.75rem">${esc(m.legal_name)} · ${esc(m.id)}</div>` }, { h: 'Country', v: m => esc(m.country) }, { h: 'Status', v: m => badge(m.status) + (m.kyb_submitted && m.status === 'pending' ? ' <span class="tag">KYB submitted</span>' : '') },
-      { h: 'Risk', v: m => badge(m.risk === 'low' ? 'approved' : m.risk, m.risk) }, { h: 'Live', v: m => m.live_enabled ? badge('active', 'live') : '<span class="faint">test only</span>' },
+      { h: 'Risk', v: m => badge(m.risk === 'low' ? 'approved' : m.risk, m.risk) + (m.approved_with_exceptions && m.status === 'approved' ? ' <span class="tag">exceptions</span>' : '') }, { h: 'Live', v: m => m.live_enabled ? badge('active', 'live') : '<span class="faint">test only</span>' },
       { h: 'Volume 30d', r: 1, v: m => fmt(m.volume_30d_usd, 'USD') }], rows, { rowAttr: m => `class="click" tabindex="0" data-act="openMerchant" data-id="${m.id}"`, empty: 'No merchants match.' });
 };
 const CHECKS = [['registration', 'Registration certificate verified'], ['owners', 'Beneficial owners identified and ID-verified'], ['website', 'Website, products and refund policy reviewed'], ['sanctions', 'Sanctions / PEP screening clear'], ['bank', 'Business ownership of receiving wallet confirmed']];
@@ -44,7 +44,8 @@ const PERMS = [['crypto', 'USDC payments'], ['refunds', 'Refunds'], ['links', 'P
 ACT.openMerchant = d => { App.tabs.md = App.tabs.md || 'verify'; App.cache.mid = d.id; openDrawer(merchantDrawer); };
 async function merchantDrawer() {
   const x = await api('GET', '/a-api/merchants/' + App.cache.mid), m = x.merchant, t = tab('md', 'verify'), dis = p => can(p) ? '' : 'disabled';
-  let b = `<div class="row" style="justify-content:space-between"><div><b>${esc(m.legal_name)}</b><div class="faint mono">${esc(m.id)}</div></div><div class="row" style="gap:6px">${badge(m.status)}${m.live_enabled ? badge('active', 'live') : ''}</div></div>`
+  let b = `<div class="row" style="justify-content:space-between"><div><b>${esc(m.legal_name)}</b><div class="faint mono">${esc(m.id)}</div></div><div class="row" style="gap:6px">${badge(m.status)}${m.approval?.with_exceptions && m.status === 'approved' ? badge('pending', 'with exceptions') : ''}${m.live_enabled ? badge('active', 'live') : ''}</div></div>`
+    + (m.approval?.with_exceptions && m.status === 'approved' ? note('warn', 'Approved with exceptions', `${esc(m.approval.by)} · ${fmtDT(m.approval.at)} · "${esc(m.approval.reason)}"<br>Open at approval: ${m.approval.exceptions.map(esc).join('; ')}`) : '')
     + tabs('md', [['verify', 'Verification'], ['wallets', 'Wallets & live'], ['controls', 'Controls'], ['pricing', 'Fees'], ['access', 'Keys & users'], ['money', 'Accounting']], 'verify');
   const mfaLocked = App.me.config.requireStaffMfa && !App.me.user.mfa_enabled;
   if (mfaLocked) b = note('danger', 'Approval controls are locked', 'Two-factor authentication is required for staff before any approval, verification or control change. <a href="#/account">Set up 2FA now →</a> — it takes about a minute with Google Authenticator, Microsoft Authenticator or Authy, then come back to this merchant.') + b;
@@ -91,9 +92,10 @@ async function merchantDrawer() {
   }
   let foot = '';
   if (can('merchants.manage')) {
-    if (m.status === 'pending') foot = `<button class="btn danger" data-act="mStatus" data-s="rejected">Reject</button><button class="btn primary" data-act="mStatus" data-s="approved" ${x.kyb_ready ? '' : 'disabled title="Complete KYB, KYC and AML first"'}>Approve merchant</button>`;
+    App.cache.mx = x;
+    if (m.status === 'pending') foot = `<button class="btn danger" data-act="mStatus" data-s="rejected">Reject</button><button class="btn primary" data-act="approveMerchant" ${!x.kyb_ready && x.strict_kyb ? 'disabled title="Strict KYB is on: complete every item first"' : ''}>${x.kyb_ready ? 'Approve merchant' : 'Approve merchant…'}</button>`;
     else if (m.status === 'approved') foot = `<button class="btn danger" data-act="mStatus" data-s="suspended">Suspend</button>`;
-    else foot = `<button class="btn" data-act="mStatus" data-s="pending">Reopen review</button>${m.status === 'suspended' ? `<button class="btn primary" data-act="mStatus" data-s="approved" ${x.kyb_ready ? '' : 'disabled'}>Reactivate</button>` : ''}`;
+    else foot = `<button class="btn" data-act="mStatus" data-s="pending">Reopen review</button>${m.status === 'suspended' ? `<button class="btn primary" data-act="approveMerchant">Reactivate</button>` : ''}`;
   }
   return { title: m.name, body: b, foot };
 }
@@ -101,7 +103,7 @@ const mid = () => App.cache.mid;
 ACT.kybCheck = (d, el) => run(() => api('POST', `/a-api/merchants/${mid()}/kyb`, { check: d.k, value: el.checked }));
 ACT.ownerAdd = () => formModal('Add owner', 'ownerAdd', `<div class="form-grid">${field('Full name', input('name', { req: true }))}${field('Ownership %', input('pct', { type: 'number', req: true, extra: 'min="0" max="100"' }))}${field('Nationality (ISO)', input('nationality', { ph: 'US', extra: 'maxlength="2"' }))}${field('Date of birth', input('dob', { type: 'date' }))}</div>`, 'Add owner');
 FORM.ownerAdd = async f => { await api('POST', `/a-api/merchants/${mid()}/owners`, f); closeModal(); toast('Owner added — upload or request their ID'); refreshDrawer(); };
-ACT.adminDocView = d => run(() => openProtected('/a-api/documents/' + d.id + '/file', d.name), { noRefresh: true });
+ACT.adminDocView = d => run(() => viewDocument('/a-api/documents/' + d.id + '/file', d.name), { noRefresh: true });
 ACT.adminDocReview = d => d.s === 'verified' ? run(() => api('POST', `/a-api/documents/${d.id}/review`, { status: 'verified' }), { ok: 'Document verified' })
   : formModal('Reject document', 'docReject', field('Reason (shown to the merchant)', '<textarea name="note" required minlength="3" placeholder="Image is blurry / expired ID / name does not match…"></textarea>'), 'Reject', { data: { id: d.id } });
 FORM.docReject = async (f, form) => { await api('POST', `/a-api/documents/${form.dataset.id}/review`, { status: 'rejected', note: f.note }); closeModal(); toast('Document rejected'); refreshDrawer(); };
@@ -111,6 +113,15 @@ ACT.adminDocPick = (d, el) => { const file = el.files[0]; if (!file) return; App
 FORM.adminDocUp = async f => { const file = App.cache.pickedDoc, data = await readFileB64(file); await api('POST', `/a-api/merchants/${mid()}/documents`, { type: f.type, owner_index: f.owner_index === '' ? undefined : +f.owner_index, filename: file.name, data }); closeModal(); toast('Uploaded'); refreshDrawer(); };
 ACT.ownerKyc = d => run(() => api('POST', `/a-api/merchants/${mid()}/kyb`, { owner: +d.i, idStatus: d.s }), { ok: 'Owner updated' });
 ACT.amlRun = () => run(() => api('POST', `/a-api/merchants/${mid()}/kyb`, { aml: true }), { ok: 'Screening complete' });
+/** Approve: clean when everything is verified; otherwise list what's open and require a reason (audited). */
+ACT.approveMerchant = () => {
+  const x = App.cache.mx, open = x.kyb_blockers || [];
+  if (!open.length) return confirmBox('Approve merchant?', 'Everything is verified. The merchant can request live activation.', 'Approve', () => api('POST', `/a-api/merchants/${mid()}/status`, { status: 'approved' }), false);
+  formModal('Approve with exceptions', 'approveExc', note('warn', `${open.length} item(s) are not verified yet`, '<ul style="margin:4px 0 0 18px;padding:0">' + open.map(o => `<li>${esc(o)}</li>`).join('') + '</ul>')
+    + field('Reason for approving now (recorded in the audit trail)', '<textarea name="reason" required minlength="10" placeholder="e.g. Known client, documents to follow within 7 days"></textarea>')
+    + '<label class="check"><input type="checkbox" name="confirm" required> I approve this merchant with the open items above. Documents can still be uploaded and verified later.</label>', 'Approve merchant');
+};
+FORM.approveExc = async f => { await api('POST', `/a-api/merchants/${mid()}/status`, { status: 'approved', override: true, reason: f.reason }); closeModal(); toast('Merchant approved with exceptions'); await render(); refreshDrawer(); };
 ACT.mStatus = d => confirmBox(`Set merchant to ${d.s}?`, d.s === 'suspended' ? 'All new payments stop and live mode is switched off.' : d.s === 'approved' ? 'The merchant can request live activation.' : 'The merchant is notified in their dashboard.', 'Confirm', () => api('POST', `/a-api/merchants/${mid()}/status`, { status: d.s }), d.s !== 'approved');
 FORM.mControls = async f => { await api('PATCH', `/a-api/merchants/${mid()}/controls`, { perms: Object.fromEntries(PERMS.map(([k]) => [k, f['perm_' + k]])), risk: f.risk,
   limits: { perTxnUSD: toMinor(f.perTxnUSD), dailyUSD: toMinor(f.dailyUSD), monthlyUSD: toMinor(f.monthlyUSD), refundDailyUSD: toMinor(f.refundDailyUSD) }, controls: { velocityPerHour: +f.velocity, blockedCountries: f.blocked.split(/[\s,]+/).filter(Boolean) } }); toast('Controls saved'); refreshDrawer(); render(); };
@@ -333,7 +344,11 @@ VIEWS['a-settings'] = async () => {
   if (t === 'platform') {
     const d = await api('GET', '/a-api/platform'), s = d.settings;
     body = `<form class="card stack" data-form="platform"><div class="card-head" style="margin:0"><h2>Rules & defaults</h2><button class="btn primary" type="submit" ${ok}>Save</button></div><div class="form-grid">
-      ${field('Default Digital Hub fee on USDC %', input('cryptoPlatPct', { type: 'number', value: s.defaults.cryptoPlatPct, extra: 'step="0.01"' }), 'Applies to merchants created after the change.')}${field('High-value alert above (USD)', input('highValue', { type: 'number', value: s.risk.highValueUSD / 100 }))}</div><div class="err" id="formErr"></div></form>
+      ${field('Default Digital Hub fee on USDC %', input('cryptoPlatPct', { type: 'number', value: s.defaults.cryptoPlatPct, extra: 'step="0.01"' }), 'Applies to merchants created after the change.')}${field('High-value alert above (USD)', input('highValue', { type: 'number', value: s.risk.highValueUSD / 100 }))}</div>
+      <label class="check"><input type="checkbox" name="staffMfa" ${d.config.requireStaffMfa ? 'checked' : ''} ${d.config.staffMfaSource.startsWith('environment') ? 'disabled' : ''}> Require two-factor authentication for staff approvals and changes ${d.config.staffMfaSource.startsWith('environment') ? '<span class="faint">(set by REQUIRE_STAFF_MFA in the environment)</span>' : ''}</label>
+      <p class="faint" style="margin:-4px 0 0 26px">Off: staff can approve without 2FA. Base mainnet (real money) still requires it in the production checks.</p>
+      <label class="check"><input type="checkbox" name="strictKyb" ${s.strictKyb ? 'checked' : ''}> Strict KYB: only approve merchants when every check, owner ID, AML and required document is verified (no exceptions)</label>
+      <div class="err" id="formErr"></div></form>
       <div class="card">${kv([['Public URL (MetaMask signatures are bound to this domain)', `<span class="mono">${esc(d.config.publicUrl)}</span>`], ['Live payments env', d.config.livePayments ? badge('active', 'on') : badge('pending', 'off')], ['Staff 2FA enforced', d.config.requireStaffMfa ? 'yes' : 'no (development)']])}</div>`;
   }
   if (t === 'diagnostics') {
@@ -392,6 +407,6 @@ ACT.testMetaMask = () => run(async () => {
 ACT.cardToggle = (d, el) => run(() => api('PATCH', '/a-api/chain', { card_sandbox: el.checked }), { ok: el.checked ? 'Card payments enabled (sandbox test cards)' : 'Card payments disabled' });
 ACT.editFeeWallet = () => formModal('Fee treasury wallet', 'feeWallet', note('info', '', 'Merchants pay Digital Hub fee statements in USDC to this address. Use a wallet Digital Hub controls (hardware wallet / multisig recommended).') + field('Address', input('fee_wallet', { ph: '0x…', extra: 'spellcheck="false"' })), 'Save');
 FORM.feeWallet = async f => { await api('PATCH', '/a-api/chain', f); closeModal(); toast('Fee wallet saved'); render(); };
-FORM.platform = async f => { const p = await api('GET', '/a-api/platform'), s = p.settings; await api('PATCH', '/a-api/platform', { risk: { declineCount: s.risk.declineCount, highValueUSD: toMinor(f.highValue) }, defaults: { ...s.defaults, cryptoPlatPct: +f.cryptoPlatPct } }); toast('Platform settings saved'); };
+FORM.platform = async f => { const p = await api('GET', '/a-api/platform'), s = p.settings; await api('PATCH', '/a-api/platform', { risk: { declineCount: s.risk.declineCount, highValueUSD: toMinor(f.highValue) }, defaults: { ...s.defaults, cryptoPlatPct: +f.cryptoPlatPct }, strictKyb: !!f.strictKyb, ...(f.staffMfa === undefined ? {} : { staffMfa: !!f.staffMfa }) }); toast('Platform settings saved'); await loadMe(); };
 
 App.boot();

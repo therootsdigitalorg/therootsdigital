@@ -461,6 +461,23 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     const nwDoc = store.list('documents', {}).find(d => d.filename === 'Northwind LLC certificate.pdf');
     assert.equal((await owner('GET', `/m-api/documents/${nwDoc.id}/file`)).status, 404, 'another merchant cannot open Northwind documents');
   });
+  await step('Approval: with or without documents (exceptions need a reason, audited); strict KYB; staff 2FA is a setting', async () => {
+    const sol = ok(await a('GET', '/a-api/merchants?q=Solvexs'))[0];
+    let r = await a('POST', `/a-api/merchants/${sol.id}/status`, { status: 'approved' }); assert.equal(r.body.error.code, 'kyb_incomplete'); assert.match(r.body.error.message, /Document missing/);
+    assert.equal((await a('POST', `/a-api/merchants/${sol.id}/status`, { status: 'approved', override: true, reason: 'short' })).status, 400, 'reason required');
+    ok(await a('PATCH', '/a-api/platform', { strictKyb: true }));
+    assert.match((await a('POST', `/a-api/merchants/${sol.id}/status`, { status: 'approved', override: true, reason: 'Known client, docs to follow' })).body.error.message, /Strict KYB/);
+    ok(await a('PATCH', '/a-api/platform', { strictKyb: false }));
+    const lock = await a('PATCH', '/a-api/platform', { staffMfa: true }); assert.equal(lock.body.error.code, 'mfa_enrollment_required', 'cannot make 2FA mandatory without having it (no lockout)');
+    store.setMeta('platform', { ...store.getMeta('platform', {}), staffMfa: true }); await new Promise(r => setTimeout(r, 5100)); // settings cache
+    assert.equal((await a('POST', `/a-api/merchants/${sol.id}/status`, { status: 'approved', override: true, reason: 'Known client, docs to follow' })).body.error.code, 'mfa_enrollment_required', '2FA setting on → staff without 2FA blocked');
+    assert.equal(ok(await a('GET', '/auth/me')).config.requireStaffMfa, true);
+    store.setMeta('platform', { ...store.getMeta('platform', {}), staffMfa: false }); await new Promise(r => setTimeout(r, 5100));
+    const m2 = ok(await a('POST', `/a-api/merchants/${sol.id}/status`, { status: 'approved', override: true, reason: 'Known client, docs to follow' }));
+    assert.equal(m2.status, 'approved'); assert.equal(m2.approval.with_exceptions, true); assert.ok(m2.approval.exceptions.some(e => /Document/.test(e)));
+    assert.ok(ok(await a('GET', '/a-api/audit?q=status_approved_with_exceptions')).some(e => e.target === sol.id));
+    assert.equal(ok(await a('GET', '/a-api/merchants?q=Solvexs'))[0].approved_with_exceptions, true);
+  });
   await step('MetaMask & Blockchain: Infura first with public failover, keys masked; diagnostics; SDK self-hosted', async () => {
     const C = require('../server/chain'), saved = process.env.BASE_SEPOLIA_RPC_URLS;
     try {

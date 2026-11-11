@@ -17,7 +17,7 @@ const usdOf = p => U.toUSD(p.method === 'card' ? p.amount : (p.creditedAmount ??
 const names = () => Object.fromEntries(store.list('merchants', {}, { limit: 10000 }).map(m => [m.id, m.name]));
 const merchantSummary = (m, mode) => {
   const pays = store.list('payments', { merchant_id: m.id, mode, status: core.PAID, since: Date.now() - 30 * DAY }, { limit: 5000 });
-  return { id: m.id, name: m.name, legal_name: m.legal_name, country: m.country, status: m.status, risk: m.risk, live_enabled: m.live_enabled, created_at: m.created_at, kyb_submitted: m.kyb.submitted,
+  return { id: m.id, name: m.name, legal_name: m.legal_name, country: m.country, status: m.status, approved_with_exceptions: !!m.approval?.with_exceptions, risk: m.risk, live_enabled: m.live_enabled, created_at: m.created_at, kyb_submitted: m.kyb.submitted,
     crypto_provider: m.cryptoProvider, providers: m.providers, hold: !!m.settlementHold, volume_30d_usd: pays.reduce((s, p) => s + usdOf(p), 0), payments_30d: pays.length };
 };
 
@@ -59,7 +59,7 @@ function routes(r) {
   });
   A('GET', '/merchants/:id', null, (ctx, c) => {
     const m = get('merchants', ctx.params.id);
-    return { merchant: m, kyb_ready: core.kybReady(m), documents: require('../documents').requirements(m), live_ready: core.liveReady(m), balances: { test: L.merchantBalances(m.id, 'test'), live: L.merchantBalances(m.id, 'live') },
+    return { merchant: m, kyb_ready: core.kybReady(m), kyb_blockers: core.kybBlockers(m), strict_kyb: !!core.platform().strictKyb, documents: require('../documents').requirements(m), live_ready: core.liveReady(m), balances: { test: L.merchantBalances(m.id, 'test'), live: L.merchantBalances(m.id, 'live') },
       users: store.list('users', { merchant_id: m.id }).map(auth.publicUser), keys: store.list('api_keys', { merchant_id: m.id }).map(k => ({ id: k.id, mode: k.mode, type: k.type, name: k.name, prefix: k.prefix, last4: k.last4, status: k.status, last_used: k.last_used, created_at: k.created_at })),
       requests: store.list('provider_requests', { merchant_id: m.id }), summary: merchantSummary(m, c.mode), wallets: store.list('merchant_wallets', { merchant_id: m.id }, { limit: 100 }).map(usdc.publicWallet), receiving: m.receiving || {},
       direct: { test: usdc.directBalances(m.id, 'test'), live: usdc.directBalances(m.id, 'live') }, webhooks: store.list('webhook_endpoints', { merchant_id: m.id }).map(e => ({ id: e.id, mode: e.mode, url: e.url, status: e.status })) };
@@ -67,10 +67,19 @@ function routes(r) {
   A('POST', '/merchants/:id/status', 'merchants.manage', (ctx, c) => {
     const m = get('merchants', ctx.params.id), to = String(ctx.body.status);
     if (!['approved', 'rejected', 'suspended', 'pending'].includes(to)) throw bad('Invalid status.');
-    if (to === 'approved' && !core.kybReady(m)) throw bad('Complete every KYB check, verify every owner and clear AML screening first.');
+    if (to === 'approved') {
+      const open = core.kybBlockers(m);
+      if (open.length) {
+        if (core.platform().strictKyb) throw bad('Strict KYB is on: complete every item first — ' + open.join('; '), 'kyb_incomplete');
+        const reason = U.str(ctx.body.reason, 500);
+        if (!ctx.body.override || reason.length < 10) throw bad('Not everything is verified yet: ' + open.join('; ') + '. To approve anyway, confirm and give a reason (10+ characters).', 'kyb_incomplete');
+        m.approval = { with_exceptions: true, exceptions: open, reason, by: c.actor, at: Date.now() };
+        core.alert('low', 'approved_with_exceptions', m.id, m.id, `Approved with ${open.length} open item(s): ${reason}`, 'test');
+      } else m.approval = { with_exceptions: false, by: c.actor, at: Date.now() };
+    }
     m.status = to; if (to !== 'approved') m.live_enabled = false;
     if (to === 'approved') for (const mode of ['test']) require('./merchant').ensurePublishable(m, mode, c.actor);
-    return saveM(m, c, 'merchant.status_' + to, U.str(ctx.body.note, 300));
+    return saveM(m, c, 'merchant.status_' + to + (m.approval?.with_exceptions && to === 'approved' ? '_with_exceptions' : ''), to === 'approved' && m.approval?.with_exceptions ? `${m.approval.reason} · open: ${m.approval.exceptions.join('; ')}` : U.str(ctx.body.note, 300));
   });
   A('POST', '/merchants/:id/kyb', 'merchants.manage', (ctx, c) => {
     const m = get('merchants', ctx.params.id), b = ctx.body;
@@ -292,11 +301,17 @@ function routes(r) {
     if (!supers.length && !(u.role === 'super_admin' && u.status === 'active')) throw bad('At least one active Super admin must remain.');
     store.put('users', u); core.audit(c.actor, 'staff.update', u.email, JSON.stringify(ctx.body)); return auth.publicUser(u);
   });
-  A('GET', '/platform', null, () => ({ settings: core.platform(), config: { livePayments: config.livePayments, sandboxDayMs: config.sandboxDayMs, requireStaffMfa: config.requireStaffMfa, publicUrl: config.publicUrl }, networks: P.NETWORKS }));
+  A('GET', '/platform', null, () => ({ settings: core.platform(), config: { staffMfaSource: config.staffMfaSource, livePayments: config.livePayments, sandboxDayMs: config.sandboxDayMs, requireStaffMfa: config.requireStaffMfa, publicUrl: config.publicUrl }, networks: P.NETWORKS }));
   A('PATCH', '/platform', 'platform.settings', (ctx, c) => {
     const b = ctx.body, cur = core.platform();
     if (b.networksEnabled) for (const k of Object.keys(cur.networksEnabled)) if (k in b.networksEnabled) cur.networksEnabled[k] = !!b.networksEnabled[k];
     if (b.approvalThresholdUSD != null) { const v = Math.round(+b.approvalThresholdUSD); if (!(v >= 0)) throw bad('Invalid threshold.'); cur.approvalThresholdUSD = v; }
+    if (b.staffMfa !== undefined) {
+      // never lock the platform out: only someone who already uses 2FA can make it mandatory
+      if (b.staffMfa && !cur.staffMfa && !c.user.mfa_enabled) throw bad('Set up two-factor authentication on your own account first (Your security), then turn this on — otherwise you would lock yourself out.', 'mfa_enrollment_required');
+      cur.staffMfa = !!b.staffMfa;
+    }
+    if (b.strictKyb !== undefined) cur.strictKyb = !!b.strictKyb;
     if (b.risk) cur.risk = { declineCount: Math.max(1, Math.round(+b.risk.declineCount || 3)), highValueUSD: Math.max(100, Math.round(+b.risk.highValueUSD || 500000)) };
     if (b.defaults) for (const k of Object.keys(cur.defaults)) if (k in b.defaults) { const v = +b.defaults[k]; if (!(v >= 0)) throw bad(`Invalid ${k}.`); cur.defaults[k] = v; }
     core.setPlatform(cur); core.audit(c.actor, 'platform.update', 'platform', Object.keys(b).join(',')); return cur;

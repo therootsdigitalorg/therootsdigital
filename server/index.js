@@ -30,7 +30,7 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
    analytics hosts (*.metamask.io). Extra hosts can be appended with METAMASK_CONNECT_CSP. No third-party script CDN. */
 const MM_CONNECT = "https://*.metamask.io wss://*.metamask.io " + String(process.env.METAMASK_CONNECT_CSP || '').trim();
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': `default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.metamask.io; connect-src 'self' ${MM_CONNECT}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.replace(/\s+;/g, ';'),
+  'Content-Security-Policy': `default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.metamask.io; connect-src 'self' ${MM_CONNECT}; frame-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.replace(/\s+;/g, ';'),
   'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
   ...(config.secureCookies ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };

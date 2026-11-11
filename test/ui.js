@@ -134,7 +134,7 @@ async function launch() {
     assert.ok(mm.calls.includes('personal_sign')); await shot('merchant-wallet'); noErrors('wallet');
   });
   await step('Merchant: every page, tab and drawer renders without errors', async () => {
-    for (const r of ['home', 'payments', 'subscriptions', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'settings', 'account']) await visit(r);
+    for (const r of ['home', 'payments', 'subscriptions', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'documents', 'settings', 'account']) await visit(r);
     await evaluate(`location.hash = '#/home'`); await pageOk('home'); await shot('merchant-home'); noErrors('merchant pages');
   });
   await step('Merchant: create a payment link through the modal', async () => {
@@ -257,6 +257,8 @@ async function launch() {
     await evaluate("[...document.querySelectorAll('#main tr.click')].find(r => /Northwind/.test(r.innerText)).click()");
     await waitFor("!!document.querySelector('#drBody') && !document.querySelector('#drBody .loading')", 8000, 'merchant drawer');
     await click('#drBody [role=tab][data-tab="verify"]'); await waitFor("/llc-certificate\\.pdf/.test(document.querySelector('#drBody').innerText)", 10000, 'document in drawer');
+    await click('#drBody [data-act=adminDocView]'); await waitFor("!!document.querySelector('#dlg iframe.doc-frame, #dlg .doc-img img')", 10000, 'document viewer'); await shot('a-document-viewer');
+    assert.ok(await evaluate("document.querySelector('#dlg iframe.doc-frame').src.startsWith('blob:')")); await evaluate("document.querySelector('#dlg').close()");
     await click('#drBody [data-act=adminDocReview][data-s=verified]'); await waitFor("/Document verified/.test(document.body.innerText)", 8000, 'verified toast');
     // regression: tables inside the drawer used to collapse to 0px (owners + Verify ID buttons invisible)
     const heights = await evaluate("[...document.querySelectorAll('#drBody .table-wrap')].map(w => Math.round(w.getBoundingClientRect().height))");
@@ -266,7 +268,14 @@ async function launch() {
     await evaluate("App.me.config.requireStaffMfa = true; refreshDrawer()"); await waitFor("/Approval controls are locked/.test(document.querySelector('#drBody').innerText)", 8000, '2FA lock banner');
     assert.ok(await evaluate("!!document.querySelector('#drBody a[href=\"#/account\"]')")); await shot('a-merchant-2fa-locked');
     await evaluate("App.me.config.requireStaffMfa = false");
-    await shot('a-merchant-documents'); await click('#drawerHost .x'); noErrors('admin documents');
+    await shot('a-merchant-documents'); await click('#drawerHost .x');
+    // approve a merchant without documents (with exceptions + reason)
+    await evaluate("[...document.querySelectorAll('#main tr.click')].find(r => /Solvexs/.test(r.innerText)).click()");
+    await waitFor("!!document.querySelector('#drFoot [data-act=approveMerchant]')", 8000, 'approve button'); await click('#drFoot [data-act=approveMerchant]');
+    await waitFor("!!document.querySelector('form[data-form=approveExc]')", 8000, 'exceptions form'); await shot('a-approve-exceptions');
+    await evaluate("(() => { const f = document.querySelector('form[data-form=approveExc]'); f.reason.value = 'Known client, documents to follow this week'; f.confirm.checked = true; f.requestSubmit(); return true; })()");
+    await waitFor("/approved with exceptions/i.test(document.body.innerText)", 10000, 'approved with exceptions'); await click('#drawerHost .x');
+    noErrors('admin documents');
   });
   await step('Responsive: admin console has no horizontal page scroll at phone width', async () => {
     await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });

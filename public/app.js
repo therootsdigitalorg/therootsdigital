@@ -81,6 +81,16 @@ async function openProtected(path, name) {
   if (w) w.location = url; else { const a = document.createElement('a'); a.href = url; a.download = name || 'document'; a.click(); }
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
+/** View a protected document inside the dashboard: images inline, PDFs in an embedded viewer, with Download / Open buttons. */
+async function viewDocument(path, name) {
+  const r = await fetch(path + (path.includes('?') ? '&' : '?') + 'inline=1', { credentials: 'same-origin', headers: { 'X-DH-Mode': App.mode } });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error?.message || 'Could not open the document.'); }
+  const blob = await r.blob(), url = URL.createObjectURL(blob), isPdf = blob.type === 'application/pdf';
+  App.cache.docUrl = url; App.cache.docName = name || 'document';
+  openModal({ title: name || 'Document', wide: true, body: isPdf ? `<iframe class="doc-frame" src="${url}" title="${esc(name)}"></iframe>` : `<div class="doc-img"><img src="${url}" alt="${esc(name)}"></div>`,
+    foot: `<span class="faint" style="margin-right:auto">${esc(blob.type)} · ${fileSize(blob.size)}</span><button class="btn" data-act="docDownload">Download</button><button class="btn" data-act="docNewTab">Open in new tab</button><button class="btn primary" data-act="closeModal">Close</button>` });
+  $('#dlg').addEventListener('close', () => setTimeout(() => URL.revokeObjectURL(url), 1000), { once: true });
+}
 const fileSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 
 /* ---------------- API client ---------------- */
@@ -153,6 +163,8 @@ function formData(form) {
 }
 
 ACT.closeModal = closeModal; ACT.closeDrawer = closeDrawer;
+ACT.docDownload = () => { const a = document.createElement('a'); a.href = App.cache.docUrl; a.download = App.cache.docName; document.body.appendChild(a); a.click(); a.remove(); };
+ACT.docNewTab = () => window.open(App.cache.docUrl, '_blank', 'noopener');
 ACT.confirmDo = async () => { const fn = App.pending; App.pending = null; closeModal(); if (fn) await run(fn); };
 ACT.copy = d => copyText(d.text);
 ACT.tab = d => { App.tabs[d.group] = d.tab; render(); refreshDrawer(); };

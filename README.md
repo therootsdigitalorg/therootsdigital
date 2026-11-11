@@ -157,10 +157,10 @@ Merchants upload documents under **Go live → Verification documents**; staff c
 - **File checks:** files are validated by their content (PDF / JPEG / PNG / WebP, max 3 MB) and **encrypted at rest** with `APP_ENCRYPTION_KEY`.
 - **Access:** merchants see only their own files. Staff with *merchants.manage* view, verify or reject them (a rejection reason is shown to the merchant), and every staff view is audited.
 - **Effect on the KYB checklist:** verifying an owner's ID marks that owner verified, and verifying the registration ticks the registration check.
-- **Approval** needs every KYB check, every owner verified, AML clear and every required document verified. The drawer lists exactly what is still missing.
+- **Approval:** when everything is verified, approve normally. Otherwise **Approve merchant…** lists the open items and requires a reason; the merchant is flagged *approved with exceptions*, the decision is audited, and documents can still be added and verified later. Platform rules → **Strict KYB** disallows exceptions.
+- **Viewing documents:** both dashboards open them in a built-in viewer (images and PDF) with Download and Open-in-new-tab. Merchants also have a **Documents** page.
 
-**Staff 2FA:** in production every privileged action requires two-factor authentication. Until an admin enrols (Your security → Set up 2FA), approval controls are disabled, and the merchant drawer shows a banner saying so.
-
+**Staff 2FA** is a Super Admin setting (Platform rules → *Require two-factor authentication for staff*), **off by default**; `REQUIRE_STAFF_MFA=1|0` in the environment overrides it. It can only be switched on by an admin who already uses 2FA, so nobody gets locked out. It remains a required production check before Base mainnet can be enabled.
 ## Sandbox cards
 
 Super Admin → Settings → MetaMask → **Card payments (sandbox test cards)** adds a **Card** tab to checkout next to

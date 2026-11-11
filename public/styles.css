@@ -185,6 +185,9 @@ dialog::backdrop{background:rgba(4,10,22,.62)}
 /* Children of the scrolling drawer/modal body must keep their height: without this, overflow containers such as
    .table-wrap collapse to 0px once the content is taller than the drawer (owners / documents tables vanished). */
 .dlg-body>*{flex-shrink:0}
+.doc-frame{width:100%;height:min(70vh,760px);border:1px solid var(--line);border-radius:var(--r-md);background:#fff}
+.doc-img{display:grid;place-items:center;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-md);padding:8px;max-height:72vh;overflow:auto}
+.doc-img img{max-width:100%;height:auto;display:block}
 .scrim{position:fixed;inset:0;background:rgba(4,10,22,.5);z-index:65}
 .x{border:0;background:none;color:var(--muted);font-size:1.3rem;cursor:pointer;line-height:1;padding:4px 8px;border-radius:6px}
 .x:hover{background:var(--surface-2);color:var(--fg)}

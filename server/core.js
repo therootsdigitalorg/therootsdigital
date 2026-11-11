@@ -20,6 +20,8 @@ const PLATFORM_DEFAULT = {
   approvalThresholdUSD: 1000000,               // minor units ($10,000)
   risk: { declineCount: 3, highValueUSD: 500000 },
   defaults: { cardPlatPct: 1.0, cryptoPlatPct: 1.0, fxSpreadBps: 25, reservePct: 5, reserveDays: 90 },
+  staffMfa: false,           // require 2FA for privileged staff actions (env REQUIRE_STAFF_MFA overrides)
+  strictKyb: false,          // true = merchants can only be approved when every KYB item incl. documents is complete (no exceptions)
 };
 let platformCache = null; // short cache: read on most requests, one DB round trip each
 const platform = () => { if (!platformCache || Date.now() - platformCache.at > 5000) platformCache = { v: store.getMeta('platform', {}), at: Date.now() }; return structuredClone({ ...PLATFORM_DEFAULT, ...platformCache.v }); };
@@ -58,6 +60,15 @@ function newMerchant({ name, legal_name, country, website, support_email }) {
   };
 }
 const merchant = mid => { const m = store.get('merchants', mid); if (!m) throw new HttpError(404, 'not_found', 'Merchant not found'); return m; };
+/** Everything still open before a "clean" approval — shown to staff and recorded when approving with exceptions. */
+function kybBlockers(m) {
+  const labels = { registration: 'Registration certificate verified', owners: 'Beneficial owners identified and ID-verified', website: 'Website, products and refund policy reviewed', sanctions: 'Sanctions / PEP screening clear', bank: 'Business ownership of receiving wallet confirmed' };
+  const out = Object.entries(m.kyb.checks).filter(([, v]) => !v).map(([k]) => 'Checklist: ' + (labels[k] || k));
+  if (!m.kyb.owners.length) out.push('No owner on file'); else for (const o of m.kyb.owners) if (o.idStatus !== 'verified') out.push('Owner ID not verified: ' + o.name);
+  if (m.kyb.aml.status !== 'clear') out.push('AML screening not clear (' + m.kyb.aml.status + ')');
+  for (const i of require('./documents').requirements(m).items) if (i.status !== 'verified') out.push(`Document ${i.status}: ${i.label}`);
+  return out;
+}
 const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners.length > 0 && m.kyb.owners.every(o => o.idStatus === 'verified') && m.kyb.aml.status === 'clear'
   && require('./documents').requirements(m).complete; // every required document (owner IDs, company registration, proof of address) verified
 function liveReady(m) {
@@ -665,7 +676,7 @@ function reconChecks(mode) {
   return [...out, ...require('./usdc').reconChecks(mode)];
 }
 
-module.exports = { METHODS, sessionPayable, newPayment, addEvent, completeSession, customerFrom, PAID, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, merchant, kybReady, liveReady, assertMode, methodAvailable, cryptoOptions,
+module.exports = { kybBlockers, METHODS, sessionPayable, newPayment, addEvent, completeSession, customerFrom, PAID, now, dayMs, platform, setPlatform, audit, alert, emit, publicEvent, newMerchant, merchant, kybReady, liveReady, assertMode, methodAvailable, cryptoOptions,
   controlCheck, non3dsAuthorized, feeQuote, publicSession, publicPayment, publicRefund, publicLink, publicPayout, createSession, createLink, linkActive, cardPay, complete3DS, capture, cancel,
   cryptoStart, cryptoDetected, cryptoTick, cryptoExpire, acceptPartial, providerPaid, maxRefundable, refund, openDispute, resolveDispute, payoutQuote, requestPayout, approvePayout,
   completePayout, rejectPayout, adjust, idempotent, runSettlement, runExpiry, runSandboxConfirmations, runDeliveries, assertWebhookTarget, reconChecks, STABLE, FIAT };

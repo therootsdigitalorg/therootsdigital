@@ -4,7 +4,7 @@ NAV.merchant = [
   ['Payments', [['home', 'Home'], ['payments', 'Transactions'], ['subscriptions', 'Subscriptions'], ['links', 'Payment links'], ['refunds', 'Refunds']]],
   ['Money', [['wallet', 'Receiving wallet'], ['balances', 'Balances & fees']]],
   ['Integrate', [['developers', 'Developers & API'], ['integrations', 'Plugins & integrations']]],
-  ['Business', [['golive', 'Go live'], ['settings', 'Settings & team']]],
+  ['Business', [['golive', 'Go live'], ['documents', 'Documents'], ['settings', 'Settings & team']]],
 ];
 const M = () => App.me.merchant;
 const liveBlocked = d => App.mode === 'live' && d ? note('warn', 'Live mode not active', esc(d) + ' You can keep working in test mode (Base Sepolia).') : '';
@@ -375,7 +375,12 @@ ACT.docUpload = (d, el) => run(async () => {
   const data = await readFileB64(f, App.cache.docs?.max_bytes);
   await api('POST', '/m-api/documents', { type: d.type, owner_index: d.owner === '' ? undefined : +d.owner, filename: f.name, data });
 }, { ok: 'Document uploaded — Digital Hub will review it' });
-ACT.docView = d => run(() => openProtected('/m-api/documents/' + d.id + '/file', d.name), { noRefresh: true });
+ACT.docView = d => run(() => viewDocument('/m-api/documents/' + d.id + '/file', d.name), { noRefresh: true });
+VIEWS.documents = async () => {
+  const [docs, ob] = await Promise.all([api('GET', '/m-api/documents'), api('GET', '/m-api/onboarding')]); App.cache.docs = docs;
+  return head('Business', 'Documents', 'Your verification documents: ID cards or passports of owners, company registration (LLC / incorporation), proof of address and anything compliance requested. View, replace or add files at any time.')
+    + docsCard(docs, ob.status);
+};
 ACT.docDelete = d => confirmBox('Delete this upload?', 'You can upload a new file afterwards.', 'Delete', () => api('DELETE', '/m-api/documents/' + d.id));
 const ownerRow = (o, i) => `<div class="form-grid" data-owner="${i}" style="grid-template-columns:2fr 1fr 1fr 1fr">${field('Full name', `<input type="text" data-o="name" value="${esc(o.name || '')}">`)}${field('Ownership %', `<input type="number" data-o="pct" min="0" max="100" value="${esc(o.pct ?? '')}">`)}${field('Date of birth', `<input type="date" data-o="dob" value="${esc(o.dob || '')}">`)}${field('Nationality', `<input type="text" data-o="nationality" maxlength="2" placeholder="US" value="${esc(o.nationality || '')}">`)}</div>`;
 ACT.addOwnerRow = () => { const box = $('#owners'); box.insertAdjacentHTML('beforeend', ownerRow({}, box.children.length)); };

@@ -42,6 +42,9 @@ function setupProblems() {
   return missing;
 }
 
+/** Staff 2FA for privileged actions: REQUIRE_STAFF_MFA=1/0 in the environment wins; otherwise the Super Admin setting
+    (Platform rules → "Require 2FA for staff", default off). Base mainnet production checks still require it. */
+const staffMfaEnv = process.env.REQUIRE_STAFF_MFA;
 module.exports = {
   ROOT, production, serverless, setupProblems,
   databaseUrl, databaseSsl: env('DATABASE_SSL'), databaseCa: env('DATABASE_CA_CERT').replace(/\\n/g, '\n'),
@@ -55,10 +58,15 @@ module.exports = {
   adminPassword: env('ADMIN_PASSWORD'),
   seedDemo: flag('SEED_DEMO', !production),
   sandboxDayMs: Math.max(5000, +env('SANDBOX_DAY_MS', '60000')),
-  requireStaffMfa: production || flag('REQUIRE_STAFF_MFA', false),
   allowPrivateWebhooks: !production && flag('ALLOW_PRIVATE_WEBHOOKS', true),
   livePayments: flag('LIVE_PAYMENTS', false),
   secureCookies: publicUrl.startsWith('https://'),
   binance: { base: env('BINANCE_PAY_BASE', 'https://bpay.binanceapi.com'), apiKey: env('BINANCE_PAY_API_KEY'), secretKey: env('BINANCE_PAY_SECRET_KEY'), publicKey: env('BINANCE_PAY_PUBLIC_KEY').replace(/\\n/g, '\n') },
   coinbase: { base: env('COINBASE_API_BASE', 'https://api.commerce.coinbase.com'), apiKey: env('COINBASE_API_KEY'), webhookSecret: env('COINBASE_WEBHOOK_SECRET') },
 };
+
+Object.defineProperty(module.exports, 'requireStaffMfa', { enumerable: true, get() {
+  if (staffMfaEnv !== undefined && staffMfaEnv !== '') return flag('REQUIRE_STAFF_MFA', false);
+  try { return !!require('./core').platform().staffMfa; } catch { return false; }
+} });
+Object.defineProperty(module.exports, 'staffMfaSource', { get: () => staffMfaEnv !== undefined && staffMfaEnv !== '' ? 'environment (REQUIRE_STAFF_MFA)' : 'Super Admin setting' });
