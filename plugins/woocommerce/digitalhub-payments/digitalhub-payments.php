@@ -132,7 +132,8 @@ add_action('plugins_loaded', function () {
                     'amount'          => $amount,
                     'currency'        => $currency,
                     'description'     => sprintf('Order #%s – %s', $order->get_order_number(), get_bloginfo('name')),
-                    'payment_methods' => ['usdc'],
+                    // Digital Hub offers only the methods switched on for this account (card = sandbox test cards for now)
+                    'payment_methods' => ['usdc', 'card'],
                     'customer_email'  => $order->get_billing_email(),
                     'metadata'        => ['order_id' => (string) $order->get_id(), 'order_key' => $order->get_order_key(), 'site' => home_url()],
                     'success_url'     => $this->get_return_url($order),

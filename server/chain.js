@@ -31,7 +31,14 @@ const DEFAULT = () => ({
   networks: Object.fromEntries(Object.values(NETWORKS).map(n => [n.key, { enabled: n.key === 'base_sepolia', rpcUrls: [], wsUrl: '', usdc: n.usdc, ...n.defaults }])),
   providers: { metamask_usdc: true, card: false, binance: false, coinbase: false, sandbox_crypto: false },
 });
+/* Cached for a few seconds: settings are read many times per request and each read is a database round trip.
+   A save on this instance updates the cache at once; other serverless instances pick it up within CACHE_MS. */
+const CACHE_MS = 5000; let cached = null;
 function settings() {
+  if (cached && Date.now() - cached.at < CACHE_MS) return structuredClone(cached.v);
+  const v = readSettings(); cached = { v, at: Date.now() }; return structuredClone(v);
+}
+function readSettings() {
   const s = store.getMeta('chain', null), d = DEFAULT();
   if (!s) return d;
   const out = { ...d, ...s, networks: { ...d.networks }, providers: { ...d.providers, ...(s.providers || {}) } };
@@ -39,7 +46,7 @@ function settings() {
   for (const k of Object.keys(NETWORKS)) if (NETWORKS[k].usdcPinned) out.networks[k].usdc = NETWORKS[k].usdc; // mainnet token can never be swapped
   return out;
 }
-const saveSettings = s => store.setMeta('chain', s);
+const saveSettings = s => { store.setMeta('chain', s); cached = null; };
 const net = key => { const n = NETWORKS[key]; if (!n) throw new U.HttpError(400, 'network_invalid', 'Unknown network.'); return { ...n, ...settings().networks[key], usdc: settings().networks[key].usdc }; };
 
 const unseal = v => { try { return U.unseal(v); } catch { return null; } };

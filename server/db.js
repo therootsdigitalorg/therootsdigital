@@ -9,7 +9,7 @@ const config = require('./config');
 
 const DOCS = ['merchants', 'users', 'sessions', 'api_keys', 'checkout_sessions', 'payments', 'refunds', 'disputes', 'payouts', 'links', 'wallets', 'banks',
   'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit',
-  'merchant_wallets', 'chain_txs', 'settlements', 'api_logs'];
+  'merchant_wallets', 'chain_txs', 'settlements', 'api_logs', 'subscriptions'];
 const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events', 'chain_txs']); // chain_txs.k = chainId:txHash → replay protection
 const usePg = !!config.databaseUrl;
 let driver = null;

@@ -1,7 +1,7 @@
 'use strict';
 /* Merchant dashboard views — MetaMask USDC on Base (non-custodial: customers pay straight into the merchant's verified wallet). */
 NAV.merchant = [
-  ['Payments', [['home', 'Home'], ['payments', 'Transactions'], ['links', 'Payment links'], ['refunds', 'Refunds']]],
+  ['Payments', [['home', 'Home'], ['payments', 'Transactions'], ['subscriptions', 'Subscriptions'], ['links', 'Payment links'], ['refunds', 'Refunds']]],
   ['Money', [['wallet', 'Receiving wallet'], ['balances', 'Balances & fees']]],
   ['Integrate', [['developers', 'Developers & API'], ['integrations', 'Plugins & integrations']]],
   ['Business', [['golive', 'Go live'], ['settings', 'Settings & team']]],
@@ -24,11 +24,18 @@ const payCols = [
   { h: 'Date', v: p => `<span class="num">${fmtDT(p.created)}</span>` },
   { h: 'Payment', v: p => `<span class="mono">${esc(short(p.id, 8, 4))}</span>` },
   { h: 'Customer', v: p => `${esc(p.customer?.email || '—')}<div class="faint mono" style="font-size:.72rem">${esc(short(p.crypto?.payer || '', 8, 6))}</div>` },
-  { h: 'Method', v: p => p.method === 'usdc' ? `USDC · ${esc(netName(p.crypto.network))}` : p.card ? `${esc(p.card.brand)} ••${esc(p.card.last4)}` : p.crypto ? `${p.crypto.asset} · ${esc(p.crypto.network)}` : esc(p.method) },
+  { h: 'Method', v: p => p.method === 'usdc' ? `USDC · ${esc(netName(p.crypto.network))}` : p.card ? cardLabel(p.card) : p.crypto ? `${p.crypto.asset} · ${esc(p.crypto.network)}` : esc(p.method) },
   { h: 'Amount', r: 1, v: p => fmt(p.amount, p.method === 'usdc' ? 'USDC' : p.currency) },
   { h: 'Conf.', r: 1, v: p => p.crypto ? `${p.crypto.confirmations}/${p.crypto.confirmations_required}` : '—' },
   { h: 'Status', v: p => badge(p.status) },
 ];
+const cardLabel = c => `${esc(c.brand)} ••••${esc(c.last4)}${c.exp_month ? ` <span class="faint">${String(c.exp_month).padStart(2, '0')}/${String(c.exp_year).slice(-2)}</span>` : ''}`;
+function cardSection(p, d) {
+  const c = p.card, t = d.three_ds || {};
+  return `<h3>Card</h3>` + kv([['Card', cardLabel(c)], ['Cardholder', esc(c.cardholder || '—')], ['Expires', c.exp_month ? `${String(c.exp_month).padStart(2, '0')}/${c.exp_year}` : '—'], ['Issuer country', esc(c.country || '—')], ['Authorization code', c.auth_code ? `<span class="mono">${esc(c.auth_code)}</span>` : '—'],
+    ['3DS', `${badge(t.result === 'authenticated' ? 'approved' : t.result || 'pending', (t.result || 'n/a').replace(/_/g, ' '))} <span class="faint">${esc(t.reason || '')}</span>`], ['Fraud liability', esc(t.liability || '—')], c.off_session && ['Charge type', 'Automatic renewal (saved card)'], d.risk && ['Risk score', `${d.risk.score} <span class="faint">(${esc(d.risk.why.join(', '))})</span>`], p.decline_code && ['Decline code', `<span class="mono">${esc(p.decline_code)}</span>`]])
+    + '<p class="faint">Full card numbers and CVCs are never stored or shown.</p>';
+}
 const payRow = p => `class="click" tabindex="0" data-act="openPayment" data-id="${p.id}"`;
 
 /* ---------------- shared MetaMask helper for dashboard transfers (refunds, fee settlements) ---------------- */
@@ -79,7 +86,8 @@ function paymentBody(d, admin) {
       ['Expected', units(c.amountUnits)], ['Received (final)', units(c.receivedUnits)], ['Confirmations', `${c.confirmations}/${c.required} · finality: ${esc(c.finality)}`], ['Invoice anchored at block', `${c.startBlock}`], c.excess && ['Owed back to customer', fmt(c.excess, 'USDC')],
       ['Payment window', `until ${fmtDT(c.expiresAt)}`]]);
     b += table([{ h: 'Transaction', v: t => txLink(c.network, t.hash) + `<div class="faint" style="font-size:.72rem">${esc(t.source || '')}</div>` }, { h: 'Block', r: 1, v: t => t.blockNumber || '—' }, { h: 'Amount', r: 1, v: t => t.valueUnits ? units(t.valueUnits) : '—' }, { h: 'Conf.', r: 1, v: t => t.confirmations ?? 0 }, { h: 'Status', v: t => badge(t.status) + (t.reason ? `<div class="faint" style="font-size:.72rem;max-width:260px">${esc(t.reason)}</div>` : '') }], c.txs, { empty: 'No transaction yet — the customer has not sent USDC.' });
-  } else if (c) b += `<h3>Stablecoin (legacy)</h3>` + kv([['Provider', esc(c.provider)], ['Asset · network', `${c.asset} · ${esc(c.network)}`], ['Amount due', fmt(c.quoteAmount, c.asset)], ['Received', fmt(c.received, c.asset)]]);
+  } else if (p.card) b += cardSection(p, d);
+  else if (c) b += `<h3>Stablecoin (legacy)</h3>` + kv([['Provider', esc(c.provider)], ['Asset · network', `${c.asset} · ${esc(c.network)}`], ['Amount due', fmt(c.quoteAmount, c.asset)], ['Received', fmt(c.received, c.asset)]]);
   b += `<h3>Amounts</h3>` + kv([['Invoice', fmt(p.amount, cur)], p.fees && ['Digital Hub fee (billed separately)', fmt(p.fees.platform, cur)], p.amount_refunded && ['Refunded', '−' + fmt(p.amount_refunded, cur)]]);
   if (d.refunds?.length) b += `<h3>Refunds</h3>` + table([{ h: 'Date', v: r => fmtDT(r.created ?? r.created_at) }, { h: 'Amount', r: 1, v: r => fmt(r.amount, r.currency) }, { h: 'To', v: r => r.to ? `<span class="mono">${esc(short(r.to, 8, 6))}</span>` : '—' }, { h: 'Tx', v: r => r.tx_hash ? txLink(r.network, r.tx_hash) : '—' }, { h: 'Status', v: r => badge(r.status) }], d.refunds);
   b += `<h3>Timeline</h3><ul class="timeline">${[...d.events].reverse().map(e => `<li><div><b>${esc(e.status.replace(/_/g, ' '))}</b> <span class="t">${fmtDT(e.at)}</span><div class="muted" style="font-size:.84rem;overflow-wrap:anywhere">${esc(e.note || '')}</div></div></li>`).join('')}</ul>`;
@@ -100,12 +108,53 @@ ACT.checkPayment = d => run(() => api('POST', `/m-api/payments/${d.id}/check`), 
 ACT.acceptPartial = d => confirmBox('Accept partial payment?', 'Mark the invoice paid at the amount actually received on-chain. Your store will be told it is paid.', 'Accept', () => api('POST', `/m-api/payments/${d.id}/accept-partial`), false);
 ACT.refundPayment = d => {
   const x = App.cache.payment, p = x.payment;
+  if (p.card) return formModal('Refund to card', 'refund', field(`Amount (${p.currency})`, input('amount', { type: 'number', value: (x.refundable / 100).toFixed(2), req: true, extra: `step="0.01" min="0.01" max="${(x.refundable / 100).toFixed(2)}"` }), `Up to ${fmt(x.refundable, p.currency)}, back to ${esc(p.card.brand)} ••••${esc(p.card.last4)}.`)
+    + field('Reason', select('reason', ['requested_by_customer', 'duplicate', 'fraudulent', 'item_returned'])), 'Refund', { data: { id: p.id, idem: 'idem_' + uid(), card: '1' } });
   formModal('Refund in USDC', 'refund', note('info', 'Non-custodial', 'Digital Hub never holds your funds. This creates a refund request; you then send the USDC from your receiving wallet with MetaMask. The refund completes when that transfer is verified on-chain.')
     + field('Amount (USDC)', input('amount', { type: 'number', value: (x.refundable / 100).toFixed(2), req: true, extra: `step="0.01" min="0.01" max="${(x.refundable / 100).toFixed(2)}"` }), `Up to ${fmt(x.refundable, 'USDC')}.`)
     + field('Send to (customer wallet)', input('address', { value: p.crypto?.payer || '', req: true, extra: 'spellcheck="false" autocomplete="off"' }), 'Defaults to the wallet that paid. Change it only if the customer asks in writing.')
     + field('Reason', select('reason', ['requested_by_customer', 'duplicate', 'fraudulent', 'item_returned', 'overpayment'])), 'Create refund', { data: { id: p.id, idem: 'idem_' + uid() } });
 };
-FORM.refund = async (f, form) => { const r = await api('POST', `/m-api/payments/${form.dataset.id}/refund`, { ...f, amount: toMinor(f.amount), idempotency_key: form.dataset.idem }); closeModal(); toast('Refund created — send it with MetaMask'); closeDrawer(); location.hash = '#/refunds'; setTimeout(() => ACT.openRefund({ id: r.id }), 200); };
+FORM.refund = async (f, form) => { const r = await api('POST', `/m-api/payments/${form.dataset.id}/refund`, { ...f, amount: toMinor(f.amount), idempotency_key: form.dataset.idem }); closeModal();
+  if (form.dataset.card) { toast(r.status === 'succeeded' ? 'Refund sent to the card' : 'Refund ' + r.status); await render(); return refreshDrawer(); } toast('Refund created — send it with MetaMask'); closeDrawer(); location.hash = '#/refunds'; setTimeout(() => ACT.openRefund({ id: r.id }), 200); };
+
+/* ---------------- subscriptions ---------------- */
+const IV = s => `every ${s.interval_count > 1 ? s.interval_count + ' ' : ''}${s.interval}${s.interval_count > 1 ? 's' : ''}`;
+VIEWS.subscriptions = async () => {
+  const subs = await api('GET', '/m-api/subscriptions'), pending = subs.filter(s => s.current_invoice);
+  return head('Payments', 'Subscriptions', 'Recurring invoices. Each period a pending invoice is created; a saved card is charged automatically, otherwise the customer pays from the invoice link (USDC with MetaMask or card).', `${liveIf(pending.length > 0, 15000)}${can('payments') ? '<button class="btn primary" data-act="newSub">New subscription</button>' : ''}`)
+    + statusBanner()
+    + `<div class="grid g3"><div class="card kpi"><div class="label">Active</div><div class="value">${subs.filter(s => s.status === 'active').length}</div><div class="sub">${subs.length} total</div></div>
+      <div class="card kpi"><div class="label">Pending invoices</div><div class="value">${pending.length}</div><div class="sub">${fmt(pending.reduce((t, s) => t + s.amount, 0), 'USD')} awaiting payment</div></div>
+      <div class="card kpi"><div class="label">Past due</div><div class="value">${subs.filter(s => s.status === 'past_due').length}</div><div class="sub">unpaid after the grace period</div></div></div>`
+    + table([{ h: 'Customer', v: s => `${esc(s.customer_email)}<div class="faint" style="font-size:.72rem">${esc(s.description)}</div>` }, { h: 'Amount', r: 1, v: s => `${fmt(s.amount, s.currency)}<div class="faint" style="font-size:.72rem">${IV(s)}</div>` },
+      { h: 'Auto-charge', v: s => s.auto_charge ? cardLabel(s.auto_charge) : '<span class="faint">pay by link</span>' }, { h: 'Next billing', v: s => s.status === 'canceled' ? '—' : fmtDT(s.next_billing_at) },
+      { h: 'Pending', r: 1, v: s => s.current_invoice ? `<b>${fmt(s.amount, s.currency)}</b>` : '—' }, { h: 'Status', v: s => badge(s.status) }], subs, { rowAttr: s => `class="click" data-act="openSub" data-id="${s.id}"`, empty: 'No subscriptions yet.' });
+};
+ACT.newSub = () => formModal('New subscription', 'sub', `<div class="form-grid">${field('Customer email', input('customer_email', { type: 'email', req: true }))}${field('Customer name', input('customer_name'))}
+  ${field('Amount', input('amount', { type: 'number', req: true, ph: '0.00', extra: 'step="0.01" min="0.50"' }))}${field('Currency', select('currency', ['USD', 'EUR', 'GBP', 'AED', 'PKR'], 'USD'), 'USDC is only offered for USD.')}
+  ${field('Every', input('interval_count', { type: 'number', value: '1', extra: 'min="1" max="12"' }))}${field('Interval', select('interval', [['month', 'Month'], ['week', 'Week'], ['year', 'Year'], ['day', 'Day']], 'month'))}</div>
+  ${field('Description', input('description', { req: true, ph: 'Pro plan' }))}<p class="faint">The first invoice is created immediately. Share its link; if the customer pays by card and ticks "save card", renewals are charged automatically.</p>`, 'Create subscription');
+FORM.sub = async f => { const s = await api('POST', '/m-api/subscriptions', { ...f, amount: toMinor(f.amount), interval_count: +f.interval_count }); closeModal(); await render(); ACT.openSub({ id: s.id }); };
+ACT.openSub = d => { App.cache.subId = d.id; openDrawer(async () => {
+  const s = await api('GET', '/m-api/subscriptions/' + App.cache.subId);
+  let b = `<div class="row" style="justify-content:space-between"><div><div class="co-amt" style="font-size:1.5rem">${fmt(s.amount, s.currency)}</div><div class="muted">${esc(s.description)} · ${IV(s)}</div></div>${badge(s.status)}</div>`
+    + kv([['Customer', `${esc(s.customer_email)}${s.customer_name ? ' · ' + esc(s.customer_name) : ''}`], ['Next billing', s.status === 'canceled' ? '—' : fmtDT(s.next_billing_at)], ['Auto-charge', s.auto_charge ? cardLabel(s.auto_charge) : 'None — customer pays from the invoice link'],
+      ['Pending invoice', s.current_invoice_url ? `<a href="${esc(s.current_invoice_url)}" target="_blank" rel="noopener" class="mono">${esc(short(s.current_invoice, 10, 4))}</a> <button class="btn sm ghost" data-act="copy" data-text="${esc(s.current_invoice_url)}">Copy link</button>` : 'none'], ['Subscription', `<span class="mono">${esc(s.id)}</span>`]]);
+  b += `<h3>Invoices</h3>` + table([{ h: 'Created', v: i => fmtDT(i.created_at) }, { h: 'Amount', r: 1, v: i => fmt(i.amount, s.currency) }, { h: 'Invoice', v: i => `<span class="mono">${esc(short(i.session, 10, 4))}</span>` }, { h: 'Status', v: i => badge(i.status) }], [...s.invoices].reverse(), { empty: 'No invoices yet.' });
+  b += `<h3>History</h3><ul class="timeline">${[...s.events].reverse().map(e => `<li><div><b>${esc(e.status.replace(/_/g, ' '))}</b> <span class="t">${fmtDT(e.at)}</span><div class="muted" style="font-size:.84rem">${esc(e.note || '')}</div></div></li>`).join('')}</ul>`;
+  const B = (a, l, c = '') => `<button class="btn ${c}" data-act="${a}" data-id="${s.id}">${l}</button>`;
+  const foot = s.status === 'canceled' || !can('payments') ? '' : B('subCancel', 'Cancel', 'danger') + (s.auto_charge ? B('subRemoveCard', 'Remove card') : '') + (s.status === 'paused' ? B('subResume', 'Resume') : B('subPause', 'Pause')) + B('subAmount', 'Change amount') + (App.mode === 'test' && !s.current_invoice ? B('subBillNow', 'Bill now (test)', 'primary') : '');
+  App.cache.sub = s;
+  return { title: 'Subscription', body: b, foot };
+}); };
+ACT.subAmount = () => formModal('Change subscription amount', 'subAmount', field(`New amount (${App.cache.sub.currency})`, input('amount', { type: 'number', req: true, value: (App.cache.sub.amount / 100).toFixed(2), extra: 'step="0.01" min="0.50"' }), 'Applies from the next invoice. An invoice already pending keeps its amount.'), 'Save');
+FORM.subAmount = async f => { await api('POST', `/m-api/subscriptions/${App.cache.subId}/update`, { amount: toMinor(f.amount) }); closeModal(); toast('Amount updated for the next invoice'); render(); refreshDrawer(); };
+ACT.subCancel = () => confirmBox('Cancel subscription?', 'No further invoices are created. An unpaid pending invoice is closed.', 'Cancel subscription', () => api('POST', `/m-api/subscriptions/${App.cache.subId}/cancel`));
+ACT.subPause = () => run(() => api('POST', `/m-api/subscriptions/${App.cache.subId}/update`, { status: 'paused' }), { ok: 'Paused' });
+ACT.subResume = () => run(() => api('POST', `/m-api/subscriptions/${App.cache.subId}/update`, { status: 'active' }), { ok: 'Resumed' });
+ACT.subRemoveCard = () => confirmBox('Remove saved card?', 'Future invoices will need to be paid from the link.', 'Remove card', () => api('POST', `/m-api/subscriptions/${App.cache.subId}/update`, { remove_card: true }));
+ACT.subBillNow = () => run(() => api('POST', `/m-api/subscriptions/${App.cache.subId}/bill-now`), { ok: 'Invoice created' });
 
 /* ---------------- refunds ---------------- */
 VIEWS.refunds = async () => {
@@ -150,7 +199,7 @@ VIEWS.links = async () => {
 ACT.newLink = () => formModal('New payment link', 'link', `<div class="form-grid">${field('Amount (USD = USDC)', input('amount', { type: 'number', req: true, ph: '0.00', extra: 'step="0.01" min="0.50"' }))}${field('Settles in', '<input type="text" value="USDC on ' + (App.mode === 'test' ? 'Base Sepolia' : 'Base') + '" disabled>')}</div>
   ${field('Description', input('description', { req: true, extra: 'maxlength="200"', ph: 'What the customer pays for' }))}
   <div class="form-grid">${field('Expires', select('expires_in_days', [['0', 'Never'], ['1', 'In 1 day'], ['7', 'In 7 days'], ['30', 'In 30 days']], '0'))}<label class="check" style="align-self:end"><input type="checkbox" name="reusable" checked> Reusable (many customers)</label></div>`, 'Create link');
-FORM.link = async f => { const l = await api('POST', '/m-api/links', { amount: toMinor(f.amount), currency: 'USD', description: f.description, payment_methods: ['usdc'], expires_in_days: +f.expires_in_days, reusable: f.reusable }); closeModal(); await render(); ACT.shareLink({ url: l.url, desc: l.description }); };
+FORM.link = async f => { const l = await api('POST', '/m-api/links', { amount: toMinor(f.amount), currency: 'USD', description: f.description, payment_methods: ['usdc', 'card'], expires_in_days: +f.expires_in_days, reusable: f.reusable }); closeModal(); await render(); ACT.shareLink({ url: l.url, desc: l.description }); };
 ACT.shareLink = d => openModal({ title: 'Share payment link', body: `<div class="row" style="align-items:flex-start"><div class="qr" id="lq"></div><div class="stack" style="flex:1;min-width:200px"><b>${esc(d.desc)}</b><div class="addr">${esc(d.url)}</div><div class="row"><button class="btn sm primary" data-act="copy" data-text="${esc(d.url)}">Copy link</button><a class="btn sm" href="${esc(d.url)}" target="_blank" rel="noopener">Open checkout</a></div>
   <span class="faint">Embed on any website:</span><pre class="code">${esc(`<a href="${d.url}" class="dh-pay-button">Pay with USDC</a>\n<script src="${location.origin}/js/digitalhub.js" async></script>`)}</pre></div></div>`, wide: true, onMount: () => qrInto($('#lq'), d.url) });
 ACT.linkStatus = d => run(() => api('POST', `/m-api/links/${d.id}/status`, { active: !!d.active }), { ok: 'Link updated' });

@@ -11,7 +11,7 @@ const C = require('../chain');
 const { HttpError, bad } = U;
 
 const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
-const EVENT_TYPES = ['checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created', 'refund.succeeded', 'refund.updated',
+const EVENT_TYPES = ['subscription.created', 'subscription.invoice_pending', 'subscription.paid', 'subscription.past_due', 'subscription.updated', 'subscription.canceled', 'checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created', 'refund.succeeded', 'refund.updated',
   'crypto.payment.created', 'crypto.payment.detected', 'crypto.payment.underpaid', 'crypto.payment.expired', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.closed'];
 
 const rate = new Map();
@@ -78,6 +78,14 @@ function routes(r) {
   const anyRefund = r => r.network ? usdc.publicRefund(r) : core.publicRefund(r);
   get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), anyRefund, lim(ctx.query)));
   get('/v1/refunds/:id', 'payments:read', async (ctx, a) => anyRefund(await usdc.refreshRefund(owned('refunds', ctx.params.id, a))));
+
+  /* subscriptions — recurring invoices; saved sandbox cards are charged automatically */
+  const SUB = require('../subscriptions');
+  post('/v1/subscriptions', 'checkout:write', (ctx, a) => SUB.publicSubscription(SUB.create(a.m, a.mode, ctx.body, actor(a))));
+  get('/v1/subscriptions', 'payments:read', (ctx, a) => listOf(store.list('subscriptions', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), SUB.publicSubscription, lim(ctx.query)));
+  get('/v1/subscriptions/:id', 'payments:read', (ctx, a) => SUB.publicSubscription(owned('subscriptions', ctx.params.id, a)));
+  post('/v1/subscriptions/:id', 'checkout:write', (ctx, a) => SUB.publicSubscription(SUB.update(owned('subscriptions', ctx.params.id, a), ctx.body, actor(a))));
+  post('/v1/subscriptions/:id/cancel', 'checkout:write', (ctx, a) => SUB.publicSubscription(SUB.cancel(owned('subscriptions', ctx.params.id, a), actor(a))));
 
   get('/v1/balance', 'balance:read', (ctx, a) => ({ object: 'balance', livemode: a.mode === 'live', balances: Object.entries(L.merchantBalances(a.m.id, a.mode)).map(([currency, b]) => ({ currency, ...b })) }));
 

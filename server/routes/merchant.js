@@ -121,6 +121,15 @@ function routes(r) {
   M('POST', '/payments/:id/simulate-dispute', 'payments', (ctx, c) => core.openDispute(mine('payments', ctx.params.id, c), U.str(ctx.body.reason, 40) || 'fraudulent', c.actor));
   M('POST', '/disputes/:id/evidence', 'payments', (ctx, c) => { const d = mine('disputes', ctx.params.id, c); const t = U.str(ctx.body.text, 4000); if (t.length < 20) throw bad('Describe your evidence (20+ characters).'); if (d.status !== 'needs_response') throw bad('Evidence already submitted.'); Object.assign(d, { status: 'under_review', evidence: t, evidence_at: Date.now() }); store.put('disputes', d); core.audit(c.actor, 'dispute.evidence', d.id, '', c.m.id); return d; });
 
+  /* ---- subscriptions ---- */
+  const SUB = require('../subscriptions');
+  M('GET', '/subscriptions', 'read', (ctx, c) => store.list('subscriptions', { merchant_id: c.m.id, mode: c.mode }, { limit: 500 }).map(SUB.publicSubscription));
+  M('GET', '/subscriptions/:id', 'read', (ctx, c) => { const s = mine('subscriptions', ctx.params.id, c); return { ...SUB.publicSubscription(s), events: s.events, invoices: s.invoices }; });
+  M('POST', '/subscriptions', 'payments', (ctx, c) => SUB.publicSubscription(SUB.create(c.m, c.mode, ctx.body, c.actor)));
+  M('POST', '/subscriptions/:id/update', 'payments', (ctx, c) => SUB.publicSubscription(SUB.update(mine('subscriptions', ctx.params.id, c), ctx.body, c.actor)));
+  M('POST', '/subscriptions/:id/cancel', 'payments', (ctx, c) => SUB.publicSubscription(SUB.cancel(mine('subscriptions', ctx.params.id, c), c.actor)));
+  M('POST', '/subscriptions/:id/bill-now', 'payments', (ctx, c) => { if (c.mode !== 'test') throw bad('Billing ahead of schedule is available in test mode only.'); const s = mine('subscriptions', ctx.params.id, c); s.next_at = Date.now(); store.put('subscriptions', s); return SUB.publicSubscription(SUB.bill(s)); });
+
   /* ---- payment links ---- */
   M('GET', '/links', 'read', (ctx, c) => store.list('links', { merchant_id: c.m.id, mode: c.mode }).map(l => ({ ...core.publicLink(l), status: core.linkActive(l) ? 'active' : (l.status === 'active' ? 'expired' : l.status), paid: l.payments.length })));
   M('POST', '/links', 'payments', (ctx, c) => core.publicLink(core.createLink(c.m, c.mode, ctx.body, c.actor)));

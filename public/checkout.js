@@ -10,7 +10,9 @@ const short = (s, a = 6, b = 4) => s && s.length > a + b + 3 ? `${s.slice(0, a)}
 const mmss = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
 const MM = window.DHMetaMask;
 const sid = location.pathname.split('/').pop();
-const st = { s: null, step: 'loading', error: '', busy: '', email: '', name: '', wallet: null, chainOk: false, balances: null, detected: null, poll: null, manual: false };
+const st = { s: null, step: 'loading', error: '', busy: '', email: '', name: '', wallet: null, chainOk: false, balances: null, detected: null, poll: null, manual: false, method: null, card: { number: '', exp: '', save: false } };
+const SYM = { USD: '$', EUR: '€', GBP: '£', AED: 'AED ', PKR: 'Rs ' };
+const fmtCur = (m, c) => SYM[c] ? `${SYM[c]}${(Math.abs(m) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : fmt(m, c);
 
 function toast(msg, kind = '') { const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = msg; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 5000); }
 async function call(method, path, body) {
@@ -38,7 +40,9 @@ async function load() {
 }
 function route() {
   const s = st.s, p = s.payment;
-  if (s.status === 'complete' || (p && ['confirmed', 'overpaid', 'partially_refunded', 'refunded'].includes(p.status))) st.step = 'done';
+  if (!st.method || !s.methods.includes(st.method)) st.method = p?.method === 'card' ? 'card' : s.methods.includes('usdc') ? 'usdc' : s.methods[0];
+  if (s.status === 'complete' || (p && ['confirmed', 'overpaid', 'partially_refunded', 'refunded', 'captured', 'authorized', 'settled'].includes(p.status))) st.step = 'done';
+  else if (p && p.method === 'card' && p.status === 'requires_action') { st.step = '3ds'; st.method = 'card'; }
   else if (s.status === 'expired') st.step = 'expired';
   else if (p && p.method === 'usdc' && ['awaiting_payment', 'confirming', 'underpaid'].includes(p.status)) st.step = p.status === 'confirming' ? 'confirming' : 'pay';
   else if (p && p.status === 'expired') st.step = 'quote_expired';
@@ -49,16 +53,18 @@ const chain = () => st.s.usdc?.chain || null;
 
 function header() {
   const s = st.s, c = chain();
-  return `<div class="co-top"><div><div class="eyebrow" style="color:var(--muted)">${esc(s.merchant.name)}</div><div class="co-amt">${fmt(s.amount, 'USDC')}</div><div class="muted">${esc(s.description)}</div></div>
-    <div class="stack" style="align-items:flex-end;gap:6px">${c ? `<span class="net-chip"><i></i>${esc(c.chainName)}</span>` : ''}${s.mode === 'test' ? '<span class="tag">TEST</span>' : ''}</div></div>`;
+  return `<div class="co-top"><div><div class="eyebrow" style="color:var(--muted)">${esc(s.merchant.name)}</div><div class="co-amt">${st.method === 'card' || !s.methods.includes('usdc') ? fmtCur(s.amount, s.currency) : fmt(s.amount, 'USDC')}</div><div class="muted">${esc(s.description)}</div></div>
+    <div class="stack" style="align-items:flex-end;gap:6px">${c && st.method !== 'card' ? `<span class="net-chip"><i></i>${esc(c.chainName)}</span>` : ''}${s.subscription ? `<span class="tag">every ${s.subscription.interval_count > 1 ? s.subscription.interval_count + ' ' : ''}${esc(s.subscription.interval)}${s.subscription.interval_count > 1 ? 's' : ''}</span>` : ''}${s.mode === 'test' ? '<span class="tag">TEST</span>' : ''}</div></div>`;
 }
 function draw() {
   const s = st.s; let body = '';
-  if (!s.methods.includes('usdc')) body = `<div class="note warn"><span>USDC payments are not available for this checkout right now. Please contact ${esc(s.merchant.name)}${s.merchant.support_email ? ` (${esc(s.merchant.support_email)})` : ''}.</span></div>`;
+  if (!s.methods.length) body = `<div class="note warn"><span>No payment method is available for this checkout right now. Please contact ${esc(s.merchant.name)}${s.merchant.support_email ? ` (${esc(s.merchant.support_email)})` : ''}.</span></div>`;
+  else if (st.step === '3ds') body = threeDSView();
+  else if (st.step === 'connect' && st.method === 'card') body = methodTabs() + cardView();
   else if (st.step === 'done') body = success();
   else if (st.step === 'expired') body = result('×', 'neutral', 'This checkout has expired', 'Return to the store and start again.');
   else if (st.step === 'quote_expired') body = result('⏱', 'warn', 'Payment window closed', 'No transfer arrived in time. Nothing was charged.', `<button class="btn primary" data-act="restart">Start again</button>`);
-  else if (st.step === 'connect') body = connectView();
+  else if (st.step === 'connect') body = methodTabs() + connectView();
   else if (st.step === 'pay') body = payView();
   else if (st.step === 'confirming') body = confirmingView();
   const cancel = s.cancel_url && !['done', 'confirming'].includes(st.step) ? `<div class="co-body" style="border-top:1px solid var(--line);padding-block:10px"><a href="${esc(s.cancel_url)}" class="faint" style="font-size:.8rem">← Cancel and return to ${esc(s.merchant.name)}</a></div>` : '';
@@ -71,6 +77,24 @@ const busyBtn = (id, label, cls = 'primary') => `<button class="btn ${cls} mm-bt
 function steps(active) {
   const list = [['Connect MetaMask', 'Choose the account you will pay from.'], [`Switch to ${chain()?.chainName}`, 'MetaMask may ask to switch or add the network.'], ['Confirm your wallet', 'A free signature — no funds move, nothing is approved.'], ['Send USDC', 'One plain token transfer straight to the merchant.']];
   return `<ol class="steps-v">${list.map(([t, d], i) => `<li><span class="dot ${i < active ? 'done' : i === active ? 'on' : ''}">${i < active ? '✓' : i + 1}</span><div><b>${esc(t)}</b><div>${esc(d)}</div></div></li>`).join('')}</ol>`;
+}
+function methodTabs() {
+  const s = st.s; if (s.methods.length < 2) return ''; // shown even when MetaMask is already connected, so returning users can still choose card
+  return `<div class="methods" role="group" aria-label="Payment method">${s.methods.map(m => `<button type="button" data-method="${m}" aria-pressed="${st.method === m}">${m === 'card' ? 'Card' : 'USDC'}<small>${m === 'card' ? 'Visa · Mastercard' + (s.card?.sandbox ? ' · test' : '') : 'MetaMask · ' + esc(chain()?.chainName || 'Base')}</small></button>`).join('')}</div>`;
+}
+function cardView() {
+  const s = st.s, cd = st.card;
+  let h = `<div class="form-grid"><label class="field"><span>Name on card</span><input id="k-name" autocomplete="cc-name" value="${esc(st.name)}"></label><label class="field"><span>Email for receipt</span><input id="c-email" type="email" autocomplete="email" value="${esc(st.email)}"></label></div>
+    <div class="hosted"><div class="hosted-label"><span>Card details</span><span>${s.card?.sandbox ? 'sandbox · test cards only' : 'secure'}</span></div>
+      <label class="field"><span>Card number</span><input id="k-num" inputmode="numeric" autocomplete="cc-number" placeholder="1234 1234 1234 1234" value="${esc(cd.number)}"></label>
+      <div class="form-grid"><label class="field"><span>Expiry (MM/YY)</span><input id="k-exp" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/YY" value="${esc(cd.exp)}"></label><label class="field"><span>CVC</span><input id="k-cvc" type="password" inputmode="numeric" autocomplete="cc-csc" maxlength="4" placeholder="123"></label></div></div>`;
+  if (s.subscription?.can_save_card) h += `<label class="check"><input type="checkbox" id="k-save" ${cd.save ? 'checked' : ''}> Save this card and charge it automatically for future renewals (cancel any time)</label>`;
+  if (s.card?.test_cards?.length) h += `<details><summary class="faint" style="cursor:pointer">Test cards</summary><div class="stack testcards" style="margin-top:8px;gap:6px">${s.card.test_cards.map(t => `<button type="button" data-tcard="${t.number}"><span class="mono">${t.number.replace(/(.{4})/g, '$1 ').trim()}</span><span class="muted">${esc(t.label)}</span></button>`).join('')}</div><p class="faint" style="margin-top:6px">Any future expiry, any CVC. 3DS code: 123456. Real card numbers are refused in sandbox.</p></details>`;
+  return h + err() + busyBtn('payCard', `Pay ${fmtCur(s.amount, s.currency)}`);
+}
+function threeDSView() {
+  return `<div class="note info"><span><b>Verify it's you.</b> Your bank asks for a one-time code (sandbox: 123456).</span></div>
+    <label class="field"><span>Verification code</span><input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>${err()}${busyBtn('otpGo', 'Verify and pay')}<button class="btn sm ghost" id="otpCancel">Cancel</button>`;
 }
 function connectView() {
   const c = chain(), w = st.wallet;
@@ -128,9 +152,10 @@ function success() {
   const s = st.s, p = s.payment, c = p?.crypto, url = s.success_url ? s.success_url + (s.success_url.includes('?') ? '&' : '?') + 'session_id=' + encodeURIComponent(s.id) : null;
   if (url && !st.redirecting) { st.redirecting = true; setTimeout(() => { location.href = url; }, 6000); }
   const tx = c?.txs?.filter(t => t.status === 'confirmed') || [];
-  const extra = p?.status === 'overpaid' ? `You sent ${fmt(c.excess, 'USDC')} more than required; ${esc(s.merchant.name)} will refund the difference to your wallet.` : `Verified on ${esc(chain()?.chainName || 'Base')}. ${esc(s.merchant.name)} has been notified.`;
+  const extra = p?.method === 'card' ? `Charged to your ${esc(p.card?.brand || 'card')}. ${esc(s.merchant.name)} has been notified.` : p?.status === 'overpaid' ? `You sent ${fmt(c.excess, 'USDC')} more than required; ${esc(s.merchant.name)} will refund the difference to your wallet.` : `Verified on ${esc(chain()?.chainName || 'Base')}. ${esc(s.merchant.name)} has been notified.`;
   return `<div class="thank-you"><div class="thank-you-mark" aria-hidden="true"><span>✓</span></div><h2>Payment received</h2><p class="muted">${extra}</p>
-    <div class="thank-you-details"><div><span>Amount</span><b>${fmt(p?.amount ?? s.amount, 'USDC')}</b></div>
+    <div class="thank-you-details"><div><span>Amount</span><b>${p?.method === 'card' ? fmtCur(p.amount, p.currency) : fmt(p?.amount ?? s.amount, 'USDC')}</b></div>
+      ${p?.card ? `<div><span>Card</span><b>${esc(p.card.brand)} •••• ${esc(p.card.last4)}</b></div><div><span>Expires</span><b>${String(p.card.exp_month || '').padStart(2, '0')}/${String(p.card.exp_year || '').slice(-2)}</b></div>${p.card.cardholder ? `<div><span>Cardholder</span><b>${esc(p.card.cardholder)}</b></div>` : ''}<div><span>Authentication</span><b>${esc((p.card.three_ds || '—').replace(/_/g, ' '))}</b></div>` : ''}
       ${c ? `<div><span>From wallet</span><b class="mono">${esc(short(c.payer, 8, 6))}</b></div><div><span>Network</span><b>${esc(chain()?.chainName || c.network)}</b></div>` : ''}
       <div><span>Status</span><b class="paid-status">${esc((p?.status || 'paid').replace(/_/g, ' '))}</b></div>
       ${tx.map(t => `<div><span>Transaction</span><b><a class="mono" href="${esc(t.url)}" target="_blank" rel="noopener">${esc(short(t.hash, 10, 8))}</a></b></div>`).join('')}
@@ -211,6 +236,32 @@ function mount() {
     restart: () => act('restart', 'Starting over…', async () => { await call('POST', `/payments/${st.s.payment.id}/retry`); st.s.payment = null; route(); }),
   })[b.dataset.act]?.());
   const e = $('#c-email'); if (e) e.oninput = () => { st.email = e.value.trim(); };
+  document.querySelectorAll('[data-method]').forEach(b => b.onclick = () => { captureCard(); st.method = b.dataset.method; st.error = ''; draw(); });
+  document.querySelectorAll('[data-tcard]').forEach(b => b.onclick = () => { captureCard(); st.card.number = b.dataset.tcard.replace(/(.{4})/g, '$1 ').trim(); st.card.exp = '12/34'; draw(); const cvc = $('#k-cvc'); if (cvc) cvc.value = '123'; });
+  const num = $('#k-num'); if (num) num.oninput = () => { num.value = num.value.replace(/\D/g, '').slice(0, 19).replace(/(.{4})/g, '$1 ').trim(); };
+  const ex = $('#k-exp'); if (ex) ex.oninput = () => { const d = ex.value.replace(/\D/g, '').slice(0, 4); ex.value = d.length > 2 ? d.slice(0, 2) + '/' + d.slice(2) : d; };
+  // read the form BEFORE act() redraws it into the busy state (the CVC is never kept in page state)
+  on('#payCard', () => { captureCard(); const cvc = $('#k-cvc')?.value || ''; act('payCard', 'Processing…', async () => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(st.email)) throw new Error('Enter a valid email address for your receipt.');
+    const r = await call('POST', '/card', { name: st.name, email: st.email, number: st.card.number, exp: st.card.exp, cvc, save_card: st.card.save });
+    st.s.payment = r; await afterCard(r);
+  }); });
+  on('#otpGo', () => { const code = $('#otp').value; act('otpGo', 'Verifying…', async () => { const r = await call('POST', `/payments/${st.s.payment.id}/3ds`, { code }); st.s.payment = r; await afterCard(r); }); });
+  on('#otpCancel', () => act('otpCancel', 'Cancelling…', async () => { const r = await call('POST', `/payments/${st.s.payment.id}/3ds`, { code: 'cancel' }); st.s.payment = r; await afterCard(r); }));
+}
+
+function captureCard() {
+  const v = id => document.getElementById(id);
+  if (v('k-name')) st.name = v('k-name').value.trim(); if (v('c-email')) st.email = v('c-email').value.trim();
+  if (v('k-num')) st.card.number = v('k-num').value; if (v('k-exp')) st.card.exp = v('k-exp').value; if (v('k-save')) st.card.save = v('k-save').checked;
+}
+async function afterCard(p) {
+  st.card.number = ''; // never keep the number around in the page after submitting
+  if (p.status === 'requires_action') { st.step = '3ds'; return; }
+  if (['captured', 'authorized', 'settled'].includes(p.status)) { st.s = await call('GET', ''); route(); return; }
+  const why = p.status === 'canceled' ? 'Payment canceled. You can try again.' : (p.decline || 'Your bank declined the payment.');
+  await call('POST', `/payments/${p.id}/retry`).catch(() => {}); st.s.payment = null; st.step = 'connect';
+  throw new Error(why);
 }
 
 /* ---------------- live status ---------------- */

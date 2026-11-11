@@ -132,6 +132,29 @@ on-chain transfer), `payment_links`, `events`, `webhook_endpoints`, `account`. K
 `crypto.payment.underpaid` · `crypto.payment.expired` · `refund.created` / `refund.succeeded` · `payment.refunded`.
 Webhooks carry `DigitalHub-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t + "." + body)>` and retry with backoff.
 
+## Sandbox cards
+
+Super Admin → Settings → MetaMask → **Card payments (sandbox test cards)** adds a **Card** tab to checkout next to
+USDC. Only test cards are accepted (4242 4242 4242 4242, 5555 5555 5555 4444, 3DS card 4000 0000 0000 3220 with code
+123456, and others). Real card numbers are refused. The receipt, Invoices, Transactions and payment details show
+brand, last 4, expiry, cardholder, authorization code and the 3DS result. **Full card numbers and CVCs are never stored
+or displayed.** Live cards stay off until a card acquirer with hosted card fields is connected (PCI DSS).
+
+## Subscriptions (recurring invoices)
+
+Create one from Dashboard → Subscriptions or `POST /v1/subscriptions` (`customer_email`, `amount`, `currency`,
+`interval` day/week/month/year, `interval_count`, `description`). Each period a **pending invoice** is created:
+
+- If the customer paid an earlier invoice by card and ticked **"save card for automatic renewals"**, that card is
+  **charged automatically**. The saved card is encrypted at rest; sandbox test cards only.
+- Otherwise, or if the charge fails (decline, or a 3DS challenge, which can't be completed without the customer present),
+  the invoice stays pending and payable from its link (USDC with MetaMask or card). `subscription.invoice_pending` is sent
+  with the pay link, and `subscription.past_due` follows after the grace period. Paying the link reactivates it.
+- Changing the amount applies from the next invoice. Pause, resume, cancel (closes the unpaid invoice), remove the saved card,
+  and **Bill now** (test mode) are in the subscription drawer.
+- Nothing is ever pulled from a MetaMask wallet automatically. Digital Hub doesn't send emails itself, so use the
+  `subscription.invoice_pending` webhook (or WooCommerce) to email the pay link.
+
 ## Supabase API (`/sb-api`)
 
 For apps that sign users in with **Supabase Auth**, and for backend services that hold a Supabase secret key. Built on

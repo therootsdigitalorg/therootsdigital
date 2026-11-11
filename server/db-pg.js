@@ -7,7 +7,7 @@ const path = require('node:path');
 const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const config = require('./config');
 
-const SCHEMA = 'digitalhub', SCHEMA_VERSION = 2, TIMEOUT_MS = config.serverless ? 20000 : 30000; // below Vercel's 30 s maxDuration
+const SCHEMA = 'digitalhub', SCHEMA_VERSION = 3, TIMEOUT_MS = config.serverless ? 20000 : 30000; // below Vercel's 30 s maxDuration
 
 function sslFor(u) {
   if (config.databaseCa) return { ca: config.databaseCa };

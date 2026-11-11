@@ -184,7 +184,7 @@ const server = http.createServer(handler);
 /* Serverless has no timers between requests: background work runs after requests, at most every 20s
    per instance, plus the daily Vercel cron as a fallback when the site is idle. */
 let lastJobs = 0;
-const dbJobs = async () => { core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); };
+const dbJobs = async () => { core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); require('./subscriptions').run(); };
 /** Run a DB step safely: on Postgres every step takes the global lock + its own transaction; RPC calls happen between steps. */
 const db = fn => store.usePg ? serial(() => store.requestTx(async () => fn())) : Promise.resolve().then(fn);
 const runDbJobs = () => db(dbJobs);
@@ -213,6 +213,7 @@ async function start() {
     setInterval(safe(() => core.runDeliveries()), 4000),
     setInterval(safe(monitor), +(process.env.CHAIN_POLL_MS || 6000)),
     setInterval(safe(() => db(() => core.runExpiry())), 10000),
+    setInterval(safe(() => db(() => require('./subscriptions').run())), 30000),
     setInterval(safe(() => db(() => { core.runSettlement('test'); core.runSettlement('live'); })), 60000),
     setInterval(safe(pruneLogs), 6 * 3600000),
   ];

@@ -360,11 +360,67 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
       assert.ok(ok(await sb('/sb-api/overview', { apikey: 'sb_secret_test123' })).paid >= 4);
     } finally { global.fetch = oldFetch; for (const k of ['SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'SUPABASE_JWKS']) process.env[k] = saved[k] ?? ''; }
   });
+  /* ---------------- sandbox cards ---------------- */
+  const cardIn = (s, number, extra = {}) => pub('POST', `/c-api/sessions/${s}/card`, { number, exp: '12/34', cvc: '123', name: 'Cara Card', email: 'cara@example.com', country: 'US', ...extra });
+  let cardPayment;
+  await step('Cards: off by default; admin switches on sandbox cards; checkout offers USDC + Card with test cards', async () => {
+    const s0 = await dh.checkout.create({ amount: 1000, currency: 'USD' }); assert.deepEqual(s0.payment_methods, ['usdc']);
+    ok(await a('PATCH', '/a-api/chain', { card_sandbox: true }));
+    const s1 = await dh.checkout.create({ amount: 35000, currency: 'USD', description: 'Packaging setup', metadata: { order_id: '901' } }); assert.deepEqual(s1.payment_methods, ['usdc', 'card']);
+    const v = ok(await pub('GET', `/c-api/sessions/${s1.id}`)); assert.equal(v.card.sandbox, true); assert.ok(v.card.test_cards.length >= 5);
+    assert.equal((await cardIn(s1.id, '4111111111111111')).body.error.code, 'test_card_required', 'real card numbers refused');
+    const r = ok(await cardIn(s1.id, '4242424242424242')); assert.equal(r.status, 'captured'); cardPayment = r;
+    assert.equal(r.card.last4, '4242'); assert.equal(r.card.exp_month, 12); assert.equal(r.card.exp_year, 2034); assert.equal(r.card.cardholder, 'Cara Card');
+    assert.ok(!JSON.stringify(store.get('payments', r.id)).includes('4242424242424242'), 'full card number never stored');
+    const eurLink = await dh.checkout.create({ amount: 1200, currency: 'EUR' }); assert.deepEqual(eurLink.payment_methods, ['card'], 'USDC drops out for non-USD');
+  });
+  await step('Cards: invoice and payment pages show brand, last 4, expiry, cardholder and 3DS; card refund works', async () => {
+    const inv = ok(await a('GET', '/a-api/invoices')).data.find(i => i.payment === cardPayment.id);
+    assert.equal(inv.payment_detail.card.last4, '4242'); assert.equal(inv.payment_detail.card.cardholder, 'Cara Card'); assert.ok(inv.payment_detail.card.three_d_secure);
+    const d = ok(await m('GET', `/m-api/payments/${cardPayment.id}`)); assert.equal(d.payment.card.exp_year, 2034); assert.ok(d.three_ds);
+    const rf = ok(await m('POST', `/m-api/payments/${cardPayment.id}/refund`, { amount: 5000, idempotency_key: 'card-rf-1' })); assert.equal(rf.status, 'succeeded');
+  });
+
+  /* ---------------- subscriptions (recurring invoices) ---------------- */
+  let sub;
+  await step('Subscriptions: first invoice pending; paying by card with "save card" activates auto-charge', async () => {
+    const r = await fetch(BASE + '/v1/subscriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + secret, 'content-type': 'application/json' }, body: JSON.stringify({ customer_email: 'sam@example.com', customer_name: 'Sam Sub', amount: 2900, currency: 'USD', interval: 'month', description: 'Pro plan' }) }).then(x => x.json());
+    sub = r; assert.equal(sub.status, 'active'); assert.ok(sub.current_invoice); assert.equal(sub.pending_amount, 2900); assert.equal(sub.auto_charge, null);
+    const v = ok(await pub('GET', `/c-api/sessions/${sub.current_invoice}`)); assert.equal(v.subscription.can_save_card, true); assert.equal(v.subscription.interval, 'month');
+    ok(await cardIn(sub.current_invoice, '5555555555554444', { save_card: true, name: 'Sam Sub', email: 'sam@example.com' }));
+    const s = ok(await m('GET', `/m-api/subscriptions/${sub.id}`)); assert.equal(s.current_invoice, null); assert.equal(s.auto_charge.last4, '4444'); assert.equal(s.invoices[0].status, 'paid');
+    assert.ok(s.next_billing_at * 1000 > Date.now() + 25 * 86400000, 'next period scheduled ~1 month out');
+    assert.ok(!JSON.stringify(store.get('subscriptions', sub.id)).includes('5555555555554444'), 'saved card is encrypted at rest');
+  });
+  await step('Subscriptions: renewal auto-charges the saved card; amount change applies to the next invoice', async () => {
+    ok(await m('POST', `/m-api/subscriptions/${sub.id}/update`, { amount: 3900 }));
+    const s = ok(await m('POST', `/m-api/subscriptions/${sub.id}/bill-now`)); assert.equal(s.current_invoice, null, 'paid automatically');
+    const d = ok(await m('GET', `/m-api/subscriptions/${sub.id}`)); assert.equal(d.invoices.length, 2); assert.equal(d.invoices[1].amount, 3900); assert.equal(d.invoices[1].status, 'paid');
+    assert.ok(d.events.some(e => e.status === 'auto_charged'));
+    const p = await dh.payments.retrieve(d.invoices[1].payment); assert.equal(p.card.off_session, true); assert.equal(p.amount, 3900);
+  });
+  await step('Subscriptions: failed auto-charge leaves the invoice pending (payable by link), then past due', async () => {
+    const doc = store.get('subscriptions', sub.id); doc.card.number = require('../server/util').seal('4000000000000002'); store.put('subscriptions', doc);
+    let s = ok(await m('POST', `/m-api/subscriptions/${sub.id}/bill-now`)); assert.ok(s.current_invoice, 'invoice still pending'); assert.equal(s.pending_amount, 3900);
+    const v = ok(await pub('GET', `/c-api/sessions/${s.current_invoice}`)); assert.equal(v.status, 'open'); assert.equal(v.payment, null);
+    const d2 = store.get('subscriptions', sub.id); d2.pending_since = Date.now() - 400 * 86400000; store.put('subscriptions', d2);
+    require('../server/subscriptions').run(); assert.equal(store.get('subscriptions', sub.id).status, 'past_due');
+    ok(await cardIn(s.current_invoice, '4242424242424242', { name: 'Sam Sub', email: 'sam@example.com' }));
+    assert.equal(store.get('subscriptions', sub.id).status, 'active', 'paying the link reactivates');
+    await core.runDeliveries(); assert.ok(received.some(e => e.type === 'subscription.invoice_pending') && received.some(e => e.type === 'subscription.past_due'));
+  });
+  await step('Subscriptions: 3DS-challenge cards are not charged off-session; cancel closes the pending invoice', async () => {
+    const doc = store.get('subscriptions', sub.id); doc.card.number = require('../server/util').seal('4000000000003220'); store.put('subscriptions', doc);
+    const s = ok(await m('POST', `/m-api/subscriptions/${sub.id}/bill-now`)); assert.ok(s.current_invoice);
+    const pays = store.list('payments', { merchant_id: doc.merchant_id }).filter(p => p.session_id === s.current_invoice); assert.equal(pays[0].declineCode, 'authentication_required');
+    const c = ok(await m('POST', `/m-api/subscriptions/${sub.id}/cancel`)); assert.equal(c.status, 'canceled'); assert.equal(store.get('checkout_sessions', s.current_invoice).status, 'expired');
+    assert.ok(ok(await a('GET', '/a-api/subscriptions')).some(x => x.id === sub.id && x.status === 'canceled'));
+  });
   await step('Ledger: every reconciliation check passes (incl. on-chain receipts, fees, no double credit)', async () => { const l = ok(await a('GET', '/a-api/ledger')); for (const c of l.checks) assert.ok(c.ok, c.name + ' — ' + c.detail); assert.ok(l.trial_balance.every(t => t.debits === t.credits)); });
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
   await step('Diagnostics: /api/health reports setup without leaking secrets', async () => { const h = ok(await pub('GET', '/api/health')); assert.equal(h.ok, true); assert.equal(h.database.schema_version, null === h.database.schema_version ? null : h.database.schema_version); assert.ok(h.database.users >= 1); const s = JSON.stringify(h); assert.ok(!s.includes(secret) && !s.includes('AdminPass12345')); });
   await step('Security headers: CSP allows MetaMask Connect only from pinned hosts', async () => { const r = await fetch(BASE + '/app'); const csp = r.headers.get('content-security-policy'); assert.match(csp, /cdn\.jsdelivr\.net/); assert.match(csp, /frame-ancestors 'none'/); });
-  await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['usdc']")); });
+  await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['usdc', 'card']")); });
 
   console.log(`\n${passed} checks passed${failed ? `, ${failed} FAILED` : ''}.`);
   receiver.close(); server.close(); sepolia.server.close(); mainnet.server.close(); wrongChain.server.close(); setTimeout(() => process.exit(), 100);

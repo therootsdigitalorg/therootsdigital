@@ -25,12 +25,14 @@ function view(s) {
     methods, cancel_url: s.cancel_url, success_url: s.success_url, customer_email: s.customer_email, expires_at: s.expires_at,
     usdc: methods.includes('usdc') ? { chain: C.walletParams(key), recipient: w.address, amount_units: E.centsToUnits(s.amount), confirmations: C.net(key).confirmations, finality: C.net(key).finality,
       quote_minutes: C.net(key).quoteMinutes, explorer: C.NETWORKS[key].explorer } : null,
+    card: methods.includes('card') ? { sandbox: s.mode === 'test', test_cards: s.mode === 'test' ? Object.entries(P.TEST_CARDS).map(([number, c]) => ({ number, brand: c.brand, country: c.country, label: c.label })) : [] } : null,
+    subscription: s.metadata?.subscription_id ? (() => { const sub = store.get('subscriptions', s.metadata.subscription_id); return sub ? { interval: sub.interval, interval_count: sub.interval_count, can_save_card: s.mode === 'test' && methods.includes('card') } : null; })() : null,
     payment: p ? paymentView(p) : null,
   };
 }
 function paymentView(p) {
   const base = { id: p.id, status: p.status, method: p.method, amount: p.amount, currency: p.currency, created: Math.floor(p.created_at / 1000), decline: p.status === 'declined' ? p.events.at(-1).note : null,
-    card: p.card ? { brand: p.card.brand, last4: p.card.last4, three_ds: p.card.threeDS?.result || null } : null };
+    card: p.card ? { brand: p.card.brand, last4: p.card.last4, exp_month: p.card.exp_month || null, exp_year: p.card.exp_year || null, cardholder: p.card.holder || null, three_ds: p.card.threeDS?.result || null } : null };
   const c = p.crypto;
   if (!c) return { ...base, crypto: null };
   if (p.method !== 'usdc') return { ...base, crypto: { provider: c.provider, asset: c.asset, network: c.network, network_label: P.NETWORKS[c.network]?.label, address: c.address || null, amount_due: c.quoteAmount, received: c.received, confirmations: c.confirmations, required: c.required, expires_at: c.expiresAt, excess: c.excess } };

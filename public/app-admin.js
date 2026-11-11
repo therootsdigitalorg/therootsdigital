@@ -1,7 +1,7 @@
 'use strict';
 /* Super Admin console — MetaMask USDC gateway on Base. */
 NAV.admin = [
-  ['Platform', [['a-overview', 'Overview'], ['a-merchants', 'Merchants'], ['a-payments', 'Transactions'], ['a-invoices', 'Invoices']]],
+  ['Platform', [['a-overview', 'Overview'], ['a-merchants', 'Merchants'], ['a-payments', 'Transactions'], ['a-invoices', 'Invoices'], ['a-subscriptions', 'Subscriptions']]],
   ['Money', [['a-wallet', 'Digital Wallet'], ['a-settlements', 'Settlements'], ['a-refunds', 'Refunds'], ['a-ledger', 'Ledger & reconciliation']]],
   ['Integrations', [['a-woo', 'WooCommerce Integrations'], ['a-apilogs', 'API Logs'], ['a-webhooks', 'Webhook deliveries']]],
   ['Governance', [['a-risk', 'Risk & Security'], ['a-approvals', 'Approvals'], ['a-audit', 'Audit Trails'], ['a-staff', 'Staff & roles']]],
@@ -23,7 +23,7 @@ VIEWS['a-overview'] = async () => {
       <div class="card kpi"><div class="label">Chain monitor</div><div class="value">${mon?.ok === false ? badge('fail', 'error') : mon?.head ? '#' + mon.head : badge('pending', 'idle')}</div><div class="sub">${esc(u.network.chainName)} (${u.network.chainId})${mon?.at ? ' · ' + fmtDT(mon.at) : ''}</div></div></div>
     ${mon?.ok === false ? note('danger', 'Monitor error', esc(mon.error)) : ''}
     <div class="split"><div class="card"><div class="card-head"><h2>Platform volume</h2><span class="faint">14 days</span></div>${barChart(d.series)}</div>
-      <div class="card"><div class="card-head"><h2>Work queues</h2><a href="#/a-approvals">Approvals →</a></div>${kv([['Wallets awaiting review', `<a href="#/a-wallet">${q.wallets}</a>`], ['Refunds awaiting merchant', `<a href="#/a-refunds">${u.refunds_open}</a>`], ['KYB reviews', q.kyb], ['Ledger adjustments', q.adjustments], ['Open risk alerts', `<a href="#/a-risk">${q.alerts}</a>`], ['Merchants', `${d.merchants.approved} approved · ${d.merchants.pending} pending · ${d.merchants.suspended} suspended`], ['Reconciliation', d.recon_ok ? badge('pass', 'all passing') : badge('fail', 'issues')]])}</div></div>
+      <div class="card"><div class="card-head"><h2>Work queues</h2><a href="#/a-approvals">Approvals →</a></div>${kv([['Wallets awaiting review', `<a href="#/a-wallet">${q.wallets}</a>`], ['Refunds awaiting merchant', `<a href="#/a-refunds">${u.refunds_open}</a>`], ['KYB reviews', q.kyb], ['Ledger adjustments', q.adjustments], ['Open risk alerts', `<a href="#/a-risk">${q.alerts}</a>`], ['Merchants', `${d.merchants.approved} approved · ${d.merchants.pending} pending · ${d.merchants.suspended} suspended`], ['Reconciliation', '<a href="#/a-ledger">Run checks →</a>']])}</div></div>
     <div class="card"><div class="card-head"><h2>Latest audit events</h2><a href="#/a-audit">Audit Trails →</a></div>${auditTable(d.audit)}</div>`;
 };
 ACT.runJobs = () => run(() => api('POST', '/a-api/jobs/run'), { ok: 'Jobs ran: expiries, webhooks' });
@@ -117,9 +117,19 @@ VIEWS['a-invoices'] = async () => {
   return head('Super admin', 'Invoices', `Checkout sessions from WooCommerce, payment links and the API · ${modeLabel()}. An invoice is paid only after the backend verifies the transfer on-chain.`)
     + `<div class="card"><div class="grid g3">${fInput('inv', 'q', 'Search', 'ID, description, email, order ID')}${fSelect('inv', 'merchant', 'Merchant', [['', 'All merchants'], ...ms.map(m => [m.id, m.name])])}${fSelect('inv', 'status', 'Status', [['', 'All'], ['open', 'Open'], ['complete', 'Paid'], ['expired', 'Expired']])}</div></div>`
     + table([{ h: 'Created', v: s => fmtDT(s.created) }, { h: 'Merchant', v: s => esc(s.merchant_name) }, { h: 'Invoice', v: s => `${mono(s.id, 10, 4)}<div class="faint" style="font-size:.72rem">${esc(s.description)}</div>` }, { h: 'Source', v: s => `<span class="tag">${esc(s.source.replace('_', ' '))}</span>${s.metadata?.order_id ? ` <span class="faint">#${esc(s.metadata.order_id)}</span>` : ''}` },
-      { h: 'Amount', r: 1, v: s => fmt(s.amount, 'USDC') }, { h: 'Payer', v: s => s.payment_detail?.payer ? mono(s.payment_detail.payer) : '—' }, { h: 'Tx', v: s => s.payment_detail?.tx ? `<a class="mono" href="${esc(EXPLORER[s.payment_detail.network] + '/tx/' + s.payment_detail.tx)}" target="_blank" rel="noopener">${esc(short(s.payment_detail.tx, 8, 4))}</a>` : '—' },
+      { h: 'Amount', r: 1, v: s => fmt(s.amount, s.payment_detail?.method === 'card' || !s.payment_methods.includes('usdc') ? s.currency : 'USDC') },
+      { h: 'Paid with', v: s => s.payment_detail?.card ? `${cardLabel(s.payment_detail.card)}${s.payment_detail.card.cardholder ? `<div class="faint" style="font-size:.72rem">${esc(s.payment_detail.card.cardholder)} · 3DS ${esc((s.payment_detail.card.three_d_secure || 'n/a').replace(/_/g, ' '))}</div>` : ''}` : s.payment_detail?.payer ? `USDC ${mono(s.payment_detail.payer)}` : '—' }, { h: 'Tx', v: s => s.payment_detail?.tx ? `<a class="mono" href="${esc(EXPLORER[s.payment_detail.network] + '/tx/' + s.payment_detail.tx)}" target="_blank" rel="noopener">${esc(short(s.payment_detail.tx, 8, 4))}</a>` : '—' },
       { h: 'Status', v: s => badge(s.status === 'complete' ? 'paid' : s.status) + (s.payment_detail && s.status !== 'complete' ? `<div class="faint" style="font-size:.72rem">${esc(s.payment_detail.status.replace(/_/g, ' '))}</div>` : '') }],
       d.data, { rowAttr: s => s.payment ? `class="click" data-act="openAdminPayment" data-id="${s.payment}"` : '', empty: 'No invoices match.' }) + `<span class="faint">${d.total} invoices (showing up to 300)</span>`;
+};
+
+/* ---------------- subscriptions ---------------- */
+VIEWS['a-subscriptions'] = async () => {
+  const f = App.filters.subs ||= { status: '' }, subs = await api('GET', '/a-api/subscriptions' + qs(f));
+  return head('Super admin', 'Subscriptions', `Recurring invoices across merchants · ${modeLabel()}. Saved sandbox cards are charged automatically; otherwise customers pay from the invoice link.`)
+    + `<div class="card"><div class="grid g3">${fSelect('subs', 'status', 'Status', [['', 'All'], ['active', 'Active'], ['past_due', 'Past due'], ['paused', 'Paused'], ['canceled', 'Canceled']])}</div></div>`
+    + table([{ h: 'Merchant', v: s => esc(s.merchant_name) }, { h: 'Customer', v: s => esc(s.customer_email) }, { h: 'Plan', v: s => `${esc(s.description)}<div class="faint" style="font-size:.72rem">${fmt(s.amount, s.currency)} every ${s.interval_count > 1 ? s.interval_count + ' ' : ''}${s.interval}${s.interval_count > 1 ? 's' : ''}</div>` },
+      { h: 'Auto-charge', v: s => s.auto_charge ? cardLabel(s.auto_charge) : '<span class="faint">link</span>' }, { h: 'Pending', r: 1, v: s => s.current_invoice ? fmt(s.amount, s.currency) : '—' }, { h: 'Next billing', v: s => s.status === 'canceled' ? '—' : fmtDT(s.next_billing_at) }, { h: 'Status', v: s => badge(s.status) }], subs, { empty: 'No subscriptions.' });
 };
 
 /* ---------------- digital wallet ---------------- */
@@ -258,7 +268,7 @@ VIEWS['a-settings'] = async () => {
   if (t === 'metamask') {
     const d = await api('GET', '/a-api/chain' + (App.cache.probe ? '?probe=1' : '')); App.cache.probe = false;
     body = `<div class="grid g3"><div class="card kpi"><div class="label">Platform mode</div><div class="value">${d.platform_mode === 'live' ? badge('live', 'LIVE · Base mainnet') : badge('sandbox', 'Sandbox · Base Sepolia')}</div><div class="sub">LIVE_PAYMENTS env: ${d.live_payments_env ? 'on' : 'off'}</div></div>
-        <div class="card kpi"><div class="label">Payment provider</div><div class="value">MetaMask · USDC</div><div class="sub">Card, Binance Pay, Coinbase and sandbox crypto are switched off (code kept for later phases)</div></div>
+        <div class="card kpi"><div class="label">Payment methods</div><div class="value">MetaMask · USDC${d.providers.card ? ' + Card' : ''}</div><div class="sub"><label class="check"><input type="checkbox" data-change="cardToggle" ${d.providers.card ? 'checked' : ''} ${ok}> Card payments (sandbox test cards)</label>Live cards need a connected acquirer. Binance Pay / Coinbase stay off.</div></div>
         <div class="card kpi"><div class="label">Fee treasury wallet</div><div class="value" style="font-size:1rem">${d.fee_wallet ? mono(d.fee_wallet, 10, 8) : '—'}</div><div class="sub"><a href="#" data-act="editFeeWallet">${d.fee_wallet ? 'Change' : 'Set'}</a></div></div></div>`
       + Object.entries(d.networks).map(([k, n]) => networkCard(k, n, ok)).join('')
       + `<div class="card stack"><div class="card-head" style="margin:0"><h2>Base mainnet — production readiness</h2><div class="row"><button class="btn" data-act="prodChecks">Run production checks</button>${d.platform_mode === 'live' ? `<button class="btn danger" data-act="setMode" data-mode="sandbox" ${ok}>Return to sandbox</button>` : `<button class="btn primary" data-act="setMode" data-mode="live" ${ok}>Enable Base mainnet</button>`}</div></div>
@@ -303,6 +313,7 @@ ACT.prodChecks = () => run(async () => {
   $('#prodOut').innerHTML = `${r.ready ? note('info', 'Ready', 'All required checks pass.') : note('warn', 'Not ready', 'Fix the failing required checks before enabling Base mainnet.')}<div class="stack" style="margin-top:10px">${r.checks.map(c => `<div class="check-row"><div><b>${esc(c.label)}</b>${c.required ? '' : ' <span class="tag">recommended</span>'}<div class="muted" style="font-size:.82rem;overflow-wrap:anywhere">${esc(c.detail || '')}</div></div>${badge(c.ok ? 'pass' : c.required ? 'fail' : 'attention', c.ok ? 'pass' : c.required ? 'fail' : 'warn')}</div>`).join('<div class="divider"></div>')}</div>`;
 }, { noRefresh: true });
 ACT.setMode = d => confirmBox(d.mode === 'live' ? 'Enable Base mainnet?' : 'Return to sandbox?', d.mode === 'live' ? 'Live-enabled merchants will receive real USDC on Base mainnet into their approved wallets. Production checks run again before the switch.' : 'Base mainnet checkout stops immediately for every merchant. In-flight payments keep being verified.', 'Confirm', () => api('POST', '/a-api/chain/mode', { mode: d.mode }), d.mode !== 'live');
+ACT.cardToggle = (d, el) => run(() => api('PATCH', '/a-api/chain', { card_sandbox: el.checked }), { ok: el.checked ? 'Card payments enabled (sandbox test cards)' : 'Card payments disabled' });
 ACT.editFeeWallet = () => formModal('Fee treasury wallet', 'feeWallet', note('info', '', 'Merchants pay Digital Hub fee statements in USDC to this address. Use a wallet Digital Hub controls (hardware wallet / multisig recommended).') + field('Address', input('fee_wallet', { ph: '0x…', extra: 'spellcheck="false"' })), 'Save');
 FORM.feeWallet = async f => { await api('PATCH', '/a-api/chain', f); closeModal(); toast('Fee wallet saved'); render(); };
 FORM.platform = async f => { const p = await api('GET', '/a-api/platform'), s = p.settings; await api('PATCH', '/a-api/platform', { risk: { declineCount: s.risk.declineCount, highValueUSD: toMinor(f.highValue) }, defaults: { ...s.defaults, cryptoPlatPct: +f.cryptoPlatPct } }); toast('Platform settings saved'); };

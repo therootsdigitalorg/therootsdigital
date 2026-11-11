@@ -40,12 +40,17 @@ function routes(r) {
       queues: { payouts: store.count('payouts', { mode: c.mode, status: ['pending_approval', 'processing'] }), destinations: store.count('wallets', { status: 'pending_review' }) + store.count('banks', { status: 'pending_review' }),
         provider_requests: store.count('provider_requests', { status: ['requested', 'submitted'] }), kyb: store.list('merchants', { status: 'pending' }).filter(m => m.kyb.submitted).length, alerts: store.count('alerts', { status: 'open' }),
         refunds: store.count('refunds', { mode: c.mode, status: 'pending_execution' }), adjustments: store.count('adjustments', { status: 'pending_approval' }), wallets: store.count('merchant_wallets', { status: 'verified' }) },
-      series, recon_ok: core.reconChecks(c.mode).every(x => x.ok), live_payments: config.livePayments, audit: store.list('audit', {}, { limit: 8 }),
+      series, live_payments: config.livePayments, audit: store.list('audit', {}, { limit: 8 }),
       usdc: (() => { const u = pays.filter(p => p.method === 'usdc'), led = store.db.prepare('SELECT account, SUM(amount) s FROM ledger WHERE mode=? AND currency=? GROUP BY account').all(c.mode, 'USDC'), g = a => led.find(r => r.account === a)?.s || 0;
         return { network: C.walletParams(C.networkFor(c.mode)), platform_mode: C.settings().platformMode, paid: u.filter(p => core.PAID.includes(p.status)).length, in_flight: u.filter(p => usdc.ACTIVE.includes(p.status)).length,
           exceptions: u.filter(p => ['underpaid', 'overpaid'].includes(p.status)).length, received: g(L.ACCT.MW_RECEIPTS), fees_receivable: g(L.ACCT.P_FEE_RCV), revenue: -g(L.ACCT.P_REV),
           wallets_pending: store.count('merchant_wallets', { status: 'verified' }), refunds_open: store.count('refunds', { mode: c.mode, status: ['requires_action', 'pending'] }), monitor: usdc.status[C.networkFor(c.mode)] || null }; })() };
   });
+
+  /** Sidebar badges: a handful of indexed COUNTs instead of the full overview. */
+  A('GET', '/counts', null, (ctx, c) => ({ wallets: store.count('merchant_wallets', { status: 'verified' }), alerts: store.count('alerts', { status: 'open' }),
+    kyb: store.list('merchants', { status: 'pending' }, { limit: 500 }).filter(m => m.kyb.submitted).length, adjustments: store.count('adjustments', { status: 'pending_approval' }),
+    refunds: store.count('refunds', { mode: c.mode, status: ['requires_action', 'pending'] }) }));
 
   /* ---- merchants ---- */
   A('GET', '/merchants', null, (ctx, c) => {
@@ -253,8 +258,11 @@ function routes(r) {
     let rows = store.list('checkout_sessions', { mode: c.mode, ...(q.merchant ? { merchant_id: q.merchant } : {}), ...(q.status ? { status: q.status } : {}) }, { limit: 3000 });
     if (s) rows = rows.filter(x => [x.id, x.description, x.customer_email, JSON.stringify(x.metadata || {})].some(v => String(v || '').toLowerCase().includes(s)));
     return { total: rows.length, data: rows.slice(0, 300).map(x => { const p = x.payment_id ? store.get('payments', x.payment_id) : null;
-      return { ...core.publicSession(x), merchant: x.merchant_id, merchant_name: n[x.merchant_id], payment_detail: p ? { id: p.id, status: p.status, payer: p.crypto?.payer || null, tx: p.crypto?.txs?.find(t => t.status === 'confirmed')?.hash || p.crypto?.txs?.at(-1)?.hash || null, network: p.crypto?.network || null } : null,
-        source: x.metadata?.order_id ? 'woocommerce' : x.link_id ? 'payment_link' : 'api' }; }) }; });
+      return { ...core.publicSession(x), merchant: x.merchant_id, merchant_name: n[x.merchant_id], payment_detail: p ? { id: p.id, status: p.status, method: p.method, card: p.card ? { brand: p.card.brand, last4: p.card.last4, exp_month: p.card.exp_month, exp_year: p.card.exp_year, cardholder: p.card.holder, three_d_secure: p.card.threeDS?.result || null } : null, payer: p.crypto?.payer || null, tx: p.crypto?.txs?.find(t => t.status === 'confirmed')?.hash || p.crypto?.txs?.at(-1)?.hash || null, network: p.crypto?.network || null } : null,
+        source: x.metadata?.subscription_id ? 'subscription' : x.metadata?.order_id ? 'woocommerce' : x.link_id ? 'payment_link' : 'api' }; }) }; });
+
+  /* Subscriptions */
+  A('GET', '/subscriptions', null, (ctx, c) => { const n = names(), SUB = require('../subscriptions'); return store.list('subscriptions', { mode: c.mode, ...(ctx.query.status ? { status: ctx.query.status } : {}) }, { limit: 2000 }).map(s => ({ ...SUB.publicSubscription(s), merchant: s.merchant_id, merchant_name: n[s.merchant_id] })); });
 
   /* Settlements: platform fees owed by merchants (funds never pass through Digital Hub) */
   A('GET', '/settlements', null, (ctx, c) => { const n = names();
@@ -321,6 +329,7 @@ function routes(r) {
     const s = C.settings(), t = await C.verifyToken(key, s.networks[key].usdc); s.tokenChecks = { ...(s.tokenChecks || {}), [key]: t }; C.saveSettings(s);
     return { rpcs: await C.probe(key), token: t }; });
   A('PATCH', '/chain', 'platform.settings', (ctx, c) => { const s = C.settings(), b = ctx.body;
+    if (b.card_sandbox !== undefined) s.providers = { ...s.providers, card: !!b.card_sandbox }; // sandbox test cards only; live cards stay off without an acquirer
     if (b.fee_wallet !== undefined) { const a = b.fee_wallet ? E.normalizeAddress(b.fee_wallet) : null; if (b.fee_wallet && !a) throw bad('Fee treasury wallet must be a valid address.'); s.feeWallet = a; }
     C.saveSettings(s); core.audit(c.actor, 'chain.settings_update', 'chain', Object.keys(b).join(',')); return { ok: true, fee_wallet: s.feeWallet }; });
   A('GET', '/chain/production-checks', null, async () => C.productionChecks({ live: true }));

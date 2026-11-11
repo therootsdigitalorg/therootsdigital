@@ -21,8 +21,9 @@ const PLATFORM_DEFAULT = {
   risk: { declineCount: 3, highValueUSD: 500000 },
   defaults: { cardPlatPct: 1.0, cryptoPlatPct: 1.0, fxSpreadBps: 25, reservePct: 5, reserveDays: 90 },
 };
-const platform = () => ({ ...PLATFORM_DEFAULT, ...store.getMeta('platform', {}) });
-const setPlatform = v => store.setMeta('platform', { ...platform(), ...v });
+let platformCache = null; // short cache: read on most requests, one DB round trip each
+const platform = () => { if (!platformCache || Date.now() - platformCache.at > 5000) platformCache = { v: store.getMeta('platform', {}), at: Date.now() }; return structuredClone({ ...PLATFORM_DEFAULT, ...platformCache.v }); };
+const setPlatform = v => { const next = { ...platform(), ...v }; store.setMeta('platform', next); platformCache = null; };
 
 /* ---------------- audit, alerts, events ---------------- */
 function audit(actor, action, target = '', detail = '', mid = null) {
@@ -82,7 +83,7 @@ function methodAvailable(m, mode, method) {
     if (mode === 'live' && chain.settings().platformMode !== 'live') return false;
     return !!require('./usdc').receivingWallet(m, mode);
   }
-  if (method === 'card') return !!prov.card && m.perms.card && mode === 'test'; // live cards need a connected acquirer adapter
+  if (method === 'card') return !!prov.card && m.perms.card && mode === 'test'; // sandbox test cards only; live cards need a connected acquirer (hosted fields)
   if (!(prov.binance || prov.coinbase || prov.sandbox_crypto)) return false;
   if (!m.perms.crypto) return false;
   if (mode === 'test') return cryptoOptions(m).length > 0;
@@ -146,7 +147,7 @@ function publicPayment(p) {
   return { id: p.id, object: 'payment', livemode: p.mode === 'live', status: p.status, amount: p.amount, currency: p.currency, method: p.method, description: p.description,
     amount_refunded: p.refunded, net: p.net, fees: p.fees, customer: { name: p.customer?.name, email: p.customer?.email, country: p.customer?.country }, metadata: p.metadata || {},
     checkout_session: p.session_id, payment_link: p.link_id || null, decline_code: p.declineCode || null,
-    card: p.card ? { brand: p.card.brand, last4: p.card.last4, country: p.card.country, three_d_secure: p.card.threeDS?.result || null } : null,
+    card: p.card ? { brand: p.card.brand, last4: p.card.last4, country: p.card.country, exp_month: p.card.exp_month || null, exp_year: p.card.exp_year || null, cardholder: p.card.holder || null, three_d_secure: p.card.threeDS?.result || null, auth_code: p.card.authCode || null, off_session: !!p.card.off_session } : null,
     crypto: p.crypto ? { provider: p.crypto.provider, asset: p.crypto.asset, network: p.crypto.network, amount_due: p.crypto.quoteAmount, amount_received: p.crypto.received, confirmations: p.crypto.confirmations, confirmations_required: p.crypto.required,
       ...(p.method === 'usdc' ? { chain_id: p.crypto.chain_id, token: p.crypto.token, payer: p.crypto.payer, recipient: p.crypto.recipient, amount_due_units: p.crypto.amountUnits, amount_received_units: p.crypto.receivedUnits,
         excess: p.crypto.excess || 0, transactions: p.crypto.txs.map(t => ({ hash: t.hash, status: t.status, block: t.blockNumber || null, confirmations: t.confirmations || 0, amount_units: t.valueUnits || null, reason: t.reason || null })) } : {}) } : null,
@@ -164,8 +165,9 @@ function createSession(m, mode, input, actor = 'api') {
   if (amount > 100000000) throw bad('amount is too large.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   for (const k of ['success_url', 'cancel_url']) if (input[k] && !U.isUrl(input[k])) throw bad(`${k} must be an http(s) URL.`, 'url_invalid');
-  let methods = [].concat(input.payment_methods || input.methods || ['usdc']).map(String).filter(x => METHODS.includes(x));
+  let methods = [].concat(input.payment_methods || input.methods || ['usdc', 'card']).map(String).filter(x => METHODS.includes(x));
   methods = methods.filter(x => methodAvailable(m, mode, x));
+  if (currency !== 'USD' && methods.includes('usdc') && methods.some(x => x !== 'usdc')) methods = methods.filter(x => x !== 'usdc');
   if (!methods.length) throw bad(require('./usdc').receivingWallet(m, mode) || mode === 'live' ? 'No requested payment method is available for this account in this mode. This platform accepts USDC via MetaMask (payment_methods: ["usdc"]).' : 'USDC checkout needs a verified receiving wallet: Dashboard → Receiving wallet → verify with MetaMask.', 'no_payment_method');
   if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC checkout is priced in USD (1 USDC = 1 USD, no conversion). Use currency USD.', 'currency_unsupported');
   const block = controlCheck(m, mode, amount, currency, null); if (block) throw bad(block, 'limit_exceeded');
@@ -183,9 +185,9 @@ function createLink(m, mode, input, actor) {
   if (!Number.isInteger(amount) || amount < 50) throw bad('amount must be an integer in minor units, at least 50.', 'amount_invalid');
   if (!FIAT.includes(currency)) throw bad(`currency must be one of ${FIAT.join(', ')}.`, 'currency_invalid');
   const description = U.str(input.description, 200); if (!description) throw bad('description is required.');
-  const methods = [].concat(input.payment_methods || ['usdc']).filter(x => METHODS.includes(x));
+  const methods = [].concat(input.payment_methods || ['usdc', 'card']).filter(x => METHODS.includes(x));
   if (!methods.length) throw bad('Choose at least one payment method.');
-  if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC payment links are priced in USD.', 'currency_unsupported');
+  if (methods.length === 1 && methods[0] === 'usdc' && currency !== 'USD') throw bad('USDC payment links are priced in USD.', 'currency_unsupported');
   const days = Number(input.expires_in_days || 0);
   const l = store.put('links', { id: id('plink'), merchant_id: m.id, mode, status: 'active', k: rid(24, 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'), amount, currency, description, methods,
     reusable: !!input.reusable, expires_at: days > 0 ? now() + days * DAY : null, payments: [] });
@@ -226,11 +228,18 @@ function cardPay(s, input) {
     if (block) { alert('low', 'control_block', m.id, s.id, block, s.mode); throw bad(block, 'blocked_by_controls'); }
     const card = { number, brand: tc.brand, country: tc.country };
     const p = newPayment(s, 'card', customer);
-    p.card = { brand: tc.brand, last4: number.slice(-4), bin: number.slice(0, 6), country: tc.country };
+    p.card = { brand: tc.brand, last4: number.slice(-4), bin: number.slice(0, 6), country: tc.country, exp_month: mm, exp_year: 2000 + yy, holder: customer.name, off_session: !!input.offSession };
+    if (input.save_card && s.metadata?.subscription_id) p.card.save_for = s.metadata.subscription_id;
     p.risk = riskScore(m, s.mode, s.amount, s.currency, card, customer);
     const d = decide3DS(m, card, s.amount, s.currency, p.risk);
     p.card.threeDS = { required: d.run, reason: d.reason, exemption: d.exemption || null };
     s.payment_id = p.id; store.put('checkout_sessions', s);
+    if (d.run && tc.threeDS === 'challenge' && input.offSession) {
+      // automatic renewal: nobody is there to complete a challenge, so the issuer's request is a decline
+      p.card.threeDS = { ...p.card.threeDS, result: 'required_off_session' };
+      p.status = 'declined'; p.declineCode = 'authentication_required'; addEvent(p, 'declined', 'Issuer requires 3DS authentication; customer must pay from the invoice link');
+      store.put('payments', p); emit(m.id, p.mode, 'payment.failed', publicPayment(p)); return p;
+    }
     if (d.run && tc.threeDS === 'challenge') {
       p.status = 'requires_action'; p.card.pendingNumber = U.seal(number); addEvent(p, 'requires_action', '3DS challenge issued by issuer ACS');
       store.put('payments', p); return p;
@@ -275,6 +284,7 @@ function authorize(p, m, s, number, threeDSResult) {
   addEvent(p, 'authorized', `Auth code ${r.authCode}`); store.put('payments', p);
   emit(m.id, p.mode, 'payment.authorized', publicPayment(p));
   if (toUSD(p.amount, p.currency) > platform().risk.highValueUSD) alert('medium', 'high_value', m.id, p.id, `High-value card payment ${fmt(p.amount, p.currency)}`, p.mode);
+  if (p.card.save_for) { require('./subscriptions').saveCard(p.card.save_for, m.id, { number, exp: `${String(p.card.exp_month).padStart(2, '0')}/${String(p.card.exp_year % 100).padStart(2, '0')}`, brand: p.card.brand, country: p.card.country }); delete p.card.save_for; store.put('payments', p); }
   if (m.captureMode === 'auto') capture(p, 'system');
   completeSession(s, p);
   return p;
@@ -307,6 +317,7 @@ function completeSession(s, p) {
   s.status = 'complete'; s.payment_status = 'paid'; s.payment_id = p.id; store.put('checkout_sessions', s);
   if (s.link_id) { const l = store.get('links', s.link_id); if (l) { l.payments.push(p.id); if (!l.reusable) l.status = 'completed'; store.put('links', l); } }
   emit(s.merchant_id, s.mode, 'checkout.session.completed', publicSession(s));
+  if (s.metadata?.subscription_id) require('./subscriptions').onInvoicePaid(s, p);
 }
 
 /* ---------------- crypto payments ---------------- */

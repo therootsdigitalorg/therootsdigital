@@ -214,7 +214,8 @@ async function render() {
   const { r, args } = route(), seq = ++renderSeq;
   const valid = (isStaff() ? NAV.admin : NAV.merchant).some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
   const name = valid ? r : (isStaff() ? 'a-overview' : 'home');
-  if (isStaff()) App.counts = await api('GET', '/a-api/overview').then(o => ({ 'a-approvals': o.queues.wallets + o.queues.kyb + o.queues.adjustments, 'a-wallet': o.queues.wallets, 'a-risk': o.queues.alerts, 'a-refunds': o.usdc.refunds_open })).catch(() => ({}));
+  // sidebar badges: light endpoint, fetched in parallel with the page instead of before it
+  if (isStaff()) api('GET', '/a-api/counts').then(o => { App.counts = { 'a-approvals': o.wallets + o.kyb + o.adjustments, 'a-wallet': o.wallets, 'a-risk': o.alerts, 'a-refunds': o.refunds }; if (seq === renderSeq) $('#rail').innerHTML = rail(name); }).catch(() => {});
   $('#rail').innerHTML = rail(name); $('#rail').classList.remove('open');
   const main = $('#main'); if (!main.firstChild) main.innerHTML = '<div class="loading">Loading…</div>';
   clearTimeout(App.refreshTimer); App.live = 0;

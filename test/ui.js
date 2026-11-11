@@ -134,7 +134,7 @@ async function launch() {
     assert.ok(mm.calls.includes('personal_sign')); await shot('merchant-wallet'); noErrors('wallet');
   });
   await step('Merchant: every page, tab and drawer renders without errors', async () => {
-    for (const r of ['home', 'payments', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'settings', 'account']) await visit(r);
+    for (const r of ['home', 'payments', 'subscriptions', 'links', 'refunds', 'wallet', 'balances', 'developers', 'integrations', 'golive', 'settings', 'account']) await visit(r);
     await evaluate(`location.hash = '#/home'`); await pageOk('home'); await shot('merchant-home'); noErrors('merchant pages');
   });
   await step('Merchant: create a payment link through the modal', async () => {
@@ -187,7 +187,7 @@ async function launch() {
   await step('Admin: sign in and visit every Super Admin page, tab and drawer', async () => {
     await login('admin@digitalhub.local', 'AdminPass12345');
     const routes = await evaluate(`NAV.admin.flatMap(([, items]) => items.map(([k]) => k))`);
-    assert.deepEqual(routes, ['a-overview', 'a-merchants', 'a-payments', 'a-invoices', 'a-wallet', 'a-settlements', 'a-refunds', 'a-ledger', 'a-woo', 'a-apilogs', 'a-webhooks', 'a-risk', 'a-approvals', 'a-audit', 'a-staff', 'a-settings']);
+    assert.deepEqual(routes, ['a-overview', 'a-merchants', 'a-payments', 'a-invoices', 'a-subscriptions', 'a-wallet', 'a-settlements', 'a-refunds', 'a-ledger', 'a-woo', 'a-apilogs', 'a-webhooks', 'a-risk', 'a-approvals', 'a-audit', 'a-staff', 'a-settings']);
     for (const rt of routes) { await visit(rt); if (['a-overview', 'a-wallet', 'a-settings', 'a-payments', 'a-risk'].includes(rt)) await shot(rt); }
     noErrors('admin pages');
   });
@@ -206,6 +206,23 @@ async function launch() {
     await evaluate(`location.hash = '#/a-settlements'`); await pageOk('a-settlements');
     await click('#main [data-act=newStatement]'); await click('#dlg [data-act=confirmDo]'); await waitFor(`/open/.test(document.querySelectorAll('#main table')[1]?.innerText || '')`, 8000, 'statement issued');
     noErrors('admin actions');
+  });
+  await step('Cards: admin enables sandbox cards in Settings; customer pays by card on the checkout (tabs, test card, receipt details)', async () => {
+    await evaluate(`location.hash = '#/a-settings'`); await pageOk('a-settings'); await click('#main [role=tab][data-tab="metamask"]'); await waitFor("!!document.querySelector('[data-change=cardToggle]')", 10000, 'card toggle');
+    await evaluate(`(() => { const el = document.querySelector('[data-change=cardToggle]'); el.checked = true; el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+    await waitFor(`/Card payments enabled/.test(document.body.innerText)`, 8000);
+    const s = await fetch(BASE + '/v1/checkout/sessions', { method: 'POST', headers: { Authorization: 'Bearer ' + secretKey, 'content-type': 'application/json' }, body: JSON.stringify({ amount: 35000, currency: 'USD', description: 'Custom Packaging & Labeling Setup', customer_email: 'buyer@example.com' }) }).then(r => r.json());
+    await goto(BASE + '/pay/' + s.id); await waitFor(`!!document.querySelector('[data-method=card]')`, 8000, 'method tabs');
+    await click('[data-method=card]'); await waitFor(`!!document.querySelector('#k-num')`); await shot('checkout-card');
+    await evaluate(`document.querySelector('details').open = true`); await click('[data-tcard="4000000000003220"]');
+    await evaluate(`(() => { document.getElementById('k-name').value = 'Rahman Buyer'; return true; })()`);
+    await click('#payCard'); await waitFor(`!!document.querySelector('#otp')`, 8000, '3DS step');
+    await evaluate(`document.getElementById('otp').value = '123456'`); await click('#otpGo');
+    await waitFor(`/Payment received/.test(document.body.innerText)`, 10000, 'card receipt'); await shot('checkout-card-paid');
+    const t = await text(); assert.match(t, /Visa •••• 3220/); assert.match(t, /12\/34/); assert.match(t, /Rahman Buyer/); assert.match(t, /authenticated/);
+    await login('admin@digitalhub.local', 'AdminPass12345'); await evaluate(`location.hash = '#/a-invoices'`); await pageOk('a-invoices');
+    await waitFor(`/Visa ••••3220/.test(document.querySelector('#main table').innerText)`, 8000, 'card on invoices page'); await shot('a-invoices-card');
+    noErrors('cards');
   });
   await step('Responsive: admin console has no horizontal page scroll at phone width', async () => {
     await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
