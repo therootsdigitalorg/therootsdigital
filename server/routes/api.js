@@ -10,7 +10,7 @@ const usdc = require('../usdc');
 const C = require('../chain');
 const { HttpError, bad } = U;
 
-const SCOPES = ['checkout:write', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
+const SCOPES = ['checkout:write', 'checkout:read', 'payments:read', 'payments:write', 'refunds:write', 'balance:read', 'links:write', 'payouts:write', 'webhooks:write', 'events:read'];
 const EVENT_TYPES = ['subscription.created', 'subscription.invoice_pending', 'subscription.paid', 'subscription.past_due', 'subscription.updated', 'subscription.canceled', 'checkout.session.completed', 'checkout.session.expired', 'payment.authorized', 'payment.succeeded', 'payment.failed', 'payment.canceled', 'payment.refunded', 'refund.created', 'refund.succeeded', 'refund.updated',
   'crypto.payment.created', 'crypto.payment.detected', 'crypto.payment.underpaid', 'crypto.payment.expired', 'payout.created', 'payout.paid', 'payout.failed', 'dispute.created', 'dispute.closed'];
 

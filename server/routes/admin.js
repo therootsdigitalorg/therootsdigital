@@ -127,6 +127,52 @@ function routes(r) {
     const reason = U.str(ctx.body.reason, 300); if (reason.length < 5) throw bad('Give a reason (shown to the merchant).');
     m.settlementHold = { reason, at: Date.now(), by: c.actor }; return saveM(m, c, 'merchant.hold_place', reason);
   });
+  /* Admin-side onboarding: create a merchant, its API keys and webhook endpoints (secrets are returned once, stored hashed / encrypted). */
+  const WOO_SCOPES = ['checkout:write', 'checkout:read', 'payments:read', 'refunds:write', 'events:read'];
+  const keyMode = (m, c) => { if (c.mode === 'live') { const why = core.liveReady(m); if (why) throw bad(why, 'live_mode_unavailable'); } return c.mode; };
+  A('POST', '/merchants', 'merchants.manage', (ctx, c) => {
+    const b = ctx.body, name = U.str(b.business_name, 120), country = U.str(b.country || 'US', 2).toUpperCase();
+    if (name.length < 2) throw bad('Enter the business name.'); if (!/^[A-Z]{2}$/.test(country)) throw bad('Choose a country.');
+    const temp = U.rid(6, 'ABCDEFGHJKLMNPQRSTUVWXYZ') + '-' + U.rid(6, 'abcdefghjkmnpqrstuvwxyz') + '-' + U.rid(4, '23456789');
+    let m, u;
+    store.tx(() => {
+      m = core.newMerchant({ name, legal_name: U.str(b.legal_name, 160) || name, country, website: U.str(b.website, 200), support_email: String(b.owner_email || '').toLowerCase() });
+      store.put('merchants', m);
+      u = auth.createUser({ email: b.owner_email, name: b.owner_name, password: temp, kind: 'merchant', role: 'owner', merchant_id: m.id });
+      require('./merchant').ensurePublishable(m, 'test', c.actor);
+      core.audit(c.actor, 'merchant.create_by_admin', m.id, name, m.id);
+    });
+    return { merchant: merchantSummary(m, c.mode), owner: auth.publicUser(u), temporary_password: temp };
+  });
+  A('POST', '/merchants/:id/keys', 'merchants.controls', (ctx, c) => {
+    const m = get('merchants', ctx.params.id), mode = keyMode(m, c);
+    const scopes = ctx.body.scope === 'woocommerce' ? WOO_SCOPES : ['*'];
+    const { key, secret } = require('./merchant').issueKey(m, mode, { name: U.str(ctx.body.name, 80) || 'Store key', scopes }, c.actor);
+    core.audit(c.actor, 'api_key.create_by_admin', key.id, mode, m.id);
+    return { id: key.id, mode, name: key.name, scopes, secret };
+  });
+  A('POST', '/merchants/:id/webhooks', 'merchants.controls', async (ctx, c) => {
+    const m = get('merchants', ctx.params.id), mode = keyMode(m, c);
+    const ep = await require('./api').createEndpoint(m, mode, { url: ctx.body.url, events: ctx.body.events || ['*'] }, c.actor);
+    return require('./api').publicEndpoint(ep, true);
+  });
+  /** One step: API key (store scopes) + webhook endpoint at <store>/wc-api/digitalhub/ → everything the plugin needs. */
+  A('POST', '/woocommerce/connect', 'merchants.controls', async (ctx, c) => {
+    const m = get('merchants', ctx.body.merchant), mode = keyMode(m, c);
+    let site; try { site = new URL(String(ctx.body.store_url || '').trim()); } catch { throw bad('Enter the store address, for example https://yourshop.com'); }
+    if (site.protocol !== 'https:' && config.production) throw bad('The store must use HTTPS.');
+    const base = site.origin + site.pathname.replace(/\/+$/, '');
+    const hook = base + '/wc-api/digitalhub/';
+    const existing = store.list('webhook_endpoints', { merchant_id: m.id, mode }).find(e => e.url === hook && e.status === 'enabled');
+    if (existing) throw bad('This store is already connected for this merchant. Revoke the old key / delete the webhook first, or use the existing settings.', 'already_connected');
+    const ep = await require('./api').createEndpoint(m, mode, { url: hook, events: ['*'], description: 'WooCommerce ' + site.host }, c.actor);
+    const { key, secret } = require('./merchant').issueKey(m, mode, { name: 'WooCommerce ' + site.host, scopes: WOO_SCOPES }, c.actor);
+    core.audit(c.actor, 'woocommerce.connect', m.id, site.host + ' ' + mode, m.id);
+    return { merchant: m.name, mode, store: site.host, plugin_settings: { digital_hub_url: config.publicUrl, test_mode: mode === 'test', secret_key: secret, webhook_secret: ep._secret },
+      webhook_url: hook, key_id: key.id, endpoint_id: ep.id, receiving_wallet: !!require('../usdc').receivingWallet(m, mode) };
+  });
+  A('POST', '/merchants/:id/webhooks/:ep/delete', 'merchants.controls', (ctx, c) => { const e = get('webhook_endpoints', ctx.params.ep); if (e.merchant_id !== ctx.params.id) throw bad('Endpoint mismatch.'); store.del('webhook_endpoints', e.id); core.audit(c.actor, 'webhook_endpoint.delete_by_admin', e.id, e.url, e.merchant_id); return { ok: true }; });
+
   A('POST', '/merchants/:id/keys/:key/revoke', 'merchants.controls', (ctx, c) => { const k = get('api_keys', ctx.params.key); if (k.merchant_id !== ctx.params.id) throw bad('Key mismatch.'); k.status = 'revoked'; store.put('api_keys', k); core.audit(c.actor, 'api_key.revoke_by_admin', k.id, '', k.merchant_id); return { ok: true }; });
   A('POST', '/merchants/:id/users/:user/status', 'merchants.manage', (ctx, c) => { const u = get('users', ctx.params.user); if (u.merchant_id !== ctx.params.id) throw bad('User mismatch.'); u.status = ctx.body.active ? 'active' : 'disabled'; store.put('users', u); core.audit(c.actor, 'merchant_user.' + u.status, u.email, '', u.merchant_id); return auth.publicUser(u); });
 

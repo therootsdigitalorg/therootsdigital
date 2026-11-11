@@ -224,6 +224,18 @@ async function launch() {
     await waitFor(`/Visa ••••3220/.test(document.querySelector('#main table').innerText)`, 8000, 'card on invoices page'); await shot('a-invoices-card');
     noErrors('cards');
   });
+  await step('Admin: New merchant + Connect a store produce working plugin settings (UI)', async () => {
+    await evaluate("location.hash = '#/a-merchants'"); await pageOk('a-merchants'); await click('#main [data-act=newMerchant]');
+    await waitFor("!!document.querySelector('form[data-form=newMerchant]')");
+    await evaluate("(() => { const f = document.querySelector('form[data-form=newMerchant]'); f.business_name.value = 'Solvexs'; f.owner_name.value = 'Sol Owner'; f.owner_email.value = 'owner@solvexs.example'; f.requestSubmit(); return true; })()");
+    await waitFor("/Merchant created/.test(document.querySelector('#dlg').innerText)", 8000, 'merchant created modal'); await evaluate("document.querySelector('#dlg').close()");
+    await evaluate("location.hash = '#/a-woo'"); await pageOk('a-woo'); await click('#main [data-act=wooConnect]');
+    await waitFor("!!document.querySelector('form[data-form=wooConnect]')", 8000, 'connect form');
+    await evaluate("(() => { const f = document.querySelector('form[data-form=wooConnect]'); f.merchant.value = [...f.merchant.options].find(o => o.text === 'Solvexs').value; f.store_url.value = 'https://shop.solvexs.example'; f.requestSubmit(); return true; })()");
+    await waitFor("/Store connected/.test(document.querySelector('#dlg').innerText)", 10000, 'connected modal'); await shot('a-woo-connected');
+    const txt = await evaluate("document.querySelector('#dlg').innerText"); assert.match(txt, /dh_test_sk_/); assert.match(txt, /whsec_/); assert.match(txt, /wc-api\/digitalhub/);
+    await evaluate("document.querySelector('#dlg').close()"); noErrors('store connect');
+  });
   await step('Responsive: admin console has no horizontal page scroll at phone width', async () => {
     await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
     for (const rt of ['a-overview', 'a-settings', 'a-wallet']) { await evaluate(`location.hash = '#/${rt}'`); await pageOk(rt); const over = await evaluate('document.documentElement.scrollWidth - window.innerWidth'); assert.ok(over <= 1, `${rt} overflows by ${over}px`); }

@@ -285,7 +285,7 @@ VIEWS.developers = async () => {
   return head('Integrate', 'Developers & API', `REST API at <span class="mono">${esc(location.origin)}/v1</span>. Test keys use Base Sepolia; live keys use Base mainnet after go-live.`)
     + tabs('dev', [['keys', 'API keys'], ['webhooks', 'Webhooks'], ['logs', 'Delivery logs'], ['events', 'Events'], ['api', 'API reference']], 'keys') + body;
 };
-const SCOPE_LABELS = { 'checkout:write': 'Create checkout sessions', 'payments:read': 'Read payments', 'payments:write': 'Capture / cancel', 'refunds:write': 'Refunds', 'balance:read': 'Balance & payouts', 'links:write': 'Payment links', 'payouts:write': 'Request payouts', 'webhooks:write': 'Manage webhooks', 'events:read': 'Read events' };
+const SCOPE_LABELS = { 'checkout:write': 'Create checkout sessions', 'checkout:read': 'Read checkout status (store return page)', 'payments:read': 'Read payments', 'payments:write': 'Capture / cancel', 'refunds:write': 'Refunds', 'balance:read': 'Balance & payouts', 'links:write': 'Payment links', 'payouts:write': 'Request payouts', 'webhooks:write': 'Manage webhooks', 'events:read': 'Read events' };
 ACT.newKey = () => formModal(`Create ${App.mode} secret key`, 'key', `${field('Name', input('name', { req: true, ph: 'WooCommerce store' }))}
   <label class="check"><input type="checkbox" name="full" checked> Full access</label><div class="field"><span>Or restrict to</span><div class="form-grid">${Object.entries(SCOPE_LABELS).map(([s, l]) => `<label class="check"><input type="checkbox" name="scopes" value="${s}" data-multi> ${esc(l)}</label>`).join('')}</div></div>
   ${field('IP allowlist (optional)', input('allowed_ips', { ph: '203.0.113.10, 198.51.100.7' }), 'Only these server IPs may use the key.')}`, 'Create key');

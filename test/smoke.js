@@ -416,6 +416,25 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     const c = ok(await m('POST', `/m-api/subscriptions/${sub.id}/cancel`)); assert.equal(c.status, 'canceled'); assert.equal(store.get('checkout_sessions', s.current_invoice).status, 'expired');
     assert.ok(ok(await a('GET', '/a-api/subscriptions')).some(x => x.id === sub.id && x.status === 'canceled'));
   });
+  await step('Store connect: admin creates a merchant and connects a WooCommerce store; the generated key and webhook work', async () => {
+    const nm = ok(await a('POST', '/a-api/merchants', { business_name: 'Solvexs Labs', country: 'US', owner_name: 'Sol Owner', owner_email: 'owner@solvexs.test', website: 'solvexs.test' }));
+    assert.match(nm.temporary_password, /^[A-Z]{6}-[a-z]{6}-\d{4}$/);
+    const mid = nm.merchant.id;
+    const conn = ok(await a('POST', '/a-api/woocommerce/connect', { merchant: mid, store_url: 'http://127.0.0.1:' + receiver.address().port }));
+    assert.match(conn.plugin_settings.secret_key, /^dh_test_sk_/); assert.match(conn.plugin_settings.webhook_secret, /^whsec_/); assert.equal(conn.plugin_settings.digital_hub_url, require('../server/config').publicUrl);
+    assert.equal((await a('POST', '/a-api/woocommerce/connect', { merchant: mid, store_url: 'http://127.0.0.1:' + receiver.address().port })).body.error.code, 'already_connected');
+    const store2 = new DigitalHub(conn.plugin_settings.secret_key, { baseUrl: BASE });
+    const s = await store2.checkout.create({ amount: 35000, currency: 'USD', description: 'Woo order #5001', payment_methods: ['usdc', 'card'], metadata: { order_id: '5001' } }, { idempotencyKey: 'wc_5001' });
+    assert.deepEqual(s.payment_methods, ['card'], 'sandbox card available; USDC waits for a verified wallet');
+    assert.equal((await store2.checkout.retrieve(s.id)).id, s.id, 'store key can read session status (checkout:read)');
+    await assert.rejects(store2.request('GET', '/balance'), /lacks/, 'store key is limited to store permissions');
+    const w = ok(await a('GET', '/a-api/woocommerce')); assert.ok(w.stores.some(x => x.merchant === mid));
+    const key = ok(await a('POST', `/a-api/merchants/${mid}/keys`, { name: 'Extra', scope: 'full' })); assert.match(key.secret, /^dh_test_sk_/);
+    const hook = ok(await a('POST', `/a-api/merchants/${mid}/webhooks`, { url: hookUrl.replace('/wc-api/digitalhub/', '/other') })); assert.match(hook.secret, /^whsec_/);
+    ok(await a('POST', `/a-api/merchants/${mid}/webhooks/${hook.id}/delete`));
+    const owner = client(); ok(await owner('POST', '/auth/login', { email: 'owner@solvexs.test', password: nm.temporary_password }));
+    assert.ok(ok(await owner('GET', '/m-api/keys')).keys.length >= 2, 'merchant sees the keys in Developers & API');
+  });
   await step('Ledger: every reconciliation check passes (incl. on-chain receipts, fees, no double credit)', async () => { const l = ok(await a('GET', '/a-api/ledger')); for (const c of l.checks) assert.ok(c.ok, c.name + ' — ' + c.detail); assert.ok(l.trial_balance.every(t => t.debits === t.credits)); });
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
   await step('Diagnostics: /api/health reports setup without leaking secrets', async () => { const h = ok(await pub('GET', '/api/health')); assert.equal(h.ok, true); assert.equal(h.database.schema_version, null === h.database.schema_version ? null : h.database.schema_version); assert.ok(h.database.users >= 1); const s = JSON.stringify(h); assert.ok(!s.includes(secret) && !s.includes('AdminPass12345')); });
