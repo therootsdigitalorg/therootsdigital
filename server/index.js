@@ -68,7 +68,7 @@ function ensureReady() {
     ready = null;
     if (e instanceof HttpError) throw e;
     console.error('[startup]', e);
-    throw new HttpError(503, 'database_unavailable', 'Could not connect to the database. Check DATABASE_URL.');
+    throw new HttpError(503, 'database_unavailable', `Could not connect to the database (${String(e.message).split(String.fromCharCode(10))[0].slice(0, 160)}). Check DATABASE_URL in Vercel: use the Supabase Transaction pooler URI and URL-encode special characters in the password. Details: /api/health`);
   });
 }
 const JSON_TYPE = { 'content-type': 'application/json' };
@@ -110,6 +110,23 @@ async function runRouteInner(req, match, ctx, pathname, cookiesOut, extraHeaders
   } catch (e) { if (cookiesOut.length) extraHeaders['Set-Cookie'] = cookiesOut; return errorResult(e, extraHeaders); }
 }
 
+/** Deployment diagnostics. Never returns secret values — only whether each setting is present and valid. */
+async function health() {
+  const envOk = k => !!String(process.env[k] || '').trim();
+  const out = { ok: true, node: process.version, serverless: config.serverless, production: config.production, public_url: config.publicUrl,
+    env: { DATABASE_URL: envOk('DATABASE_URL') || envOk('POSTGRES_URL'), APP_ENCRYPTION_KEY: /^[0-9a-f]{64}$/i.test(process.env.APP_ENCRYPTION_KEY || '') ? 'valid' : envOk('APP_ENCRYPTION_KEY') ? 'INVALID (must be 64 hex characters)' : 'missing',
+      ADMIN_EMAIL: envOk('ADMIN_EMAIL'), ADMIN_PASSWORD: envOk('ADMIN_PASSWORD'), PUBLIC_URL: envOk('PUBLIC_URL'), CRON_SECRET: envOk('CRON_SECRET'), SUPABASE_URL: envOk('SUPABASE_URL'), SUPABASE_SECRET_KEY: envOk('SUPABASE_SECRET_KEY') },
+    setup_missing: config.setupProblems(), database: null };
+  if (store.usePg) {
+    try { const u = new URL(config.databaseUrl); out.database_target = { host: u.hostname, port: u.port || '5432', user: decodeURIComponent(u.username) }; if (!/./.test(u.hostname) && u.hostname !== 'localhost') out.database_target.hint = 'Host looks wrong — the password probably contains @, # or / that must be URL-encoded (@ → %40, # → %23, / → %2F).'; }
+    catch { out.database_target = 'DATABASE_URL is not a valid URL — URL-encode special characters in the password (@ → %40, # → %23, / → %2F)'; }
+  }
+  try {
+    out.database = await serial(() => { store.open(); return { driver: store.usePg ? 'postgres' : 'sqlite', schema_version: store.getMeta('schema_version', null), users: store.count('users') }; });
+  } catch (e) { out.ok = false; out.database = { error: String(e.message).split('\n')[0] }; }
+  if (out.setup_missing.length) out.ok = false;
+  return out;
+}
 async function handle(req, res) {
   const url = new URL(req.url, config.publicUrl);
   const forwarded = config.serverless ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
@@ -125,6 +142,7 @@ async function handle(req, res) {
   }
 
   const finish = r => r.file ? serveStatic(res, r.file, r.type) : send(res, r.status, r.body, r.headers);
+  if (pathname === '/api/health' && req.method === 'GET') return finish({ status: 200, body: JSON.stringify(await health()), headers: { ...JSON_TYPE, 'cache-control': 'no-store' } });
   const missing = config.setupProblems();
   if (missing.length) return finish(errorResult(new HttpError(503, 'setup_incomplete', `Server setup incomplete. Add these environment variables in Vercel: ${missing.join(', ')}`)));
 

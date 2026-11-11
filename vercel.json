@@ -32,6 +32,10 @@
     {
       "source": "/api/cron",
       "destination": "/api/index"
+    },
+    {
+      "source": "/api/health",
+      "destination": "/api/index"
     }
   ],
   "crons": [

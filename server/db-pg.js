@@ -7,7 +7,7 @@ const path = require('node:path');
 const { Worker, MessageChannel, receiveMessageOnPort } = require('node:worker_threads');
 const config = require('./config');
 
-const SCHEMA = 'digitalhub', SCHEMA_VERSION = 2, TIMEOUT_MS = 30000;
+const SCHEMA = 'digitalhub', SCHEMA_VERSION = 2, TIMEOUT_MS = config.serverless ? 20000 : 30000; // below Vercel's 30 s maxDuration
 
 function sslFor(u) {
   if (config.databaseCa) return { ca: config.databaseCa };
@@ -22,12 +22,16 @@ function open(tables, uniqueK) {
   const flag = new SharedArrayBuffer(4), signal = new Int32Array(flag);
   const worker = new Worker(path.join(__dirname, 'pg-worker.js'), { workerData: { url: u.href, ssl, port: port2, flag }, transferList: [port2] });
   worker.unref(); port1.unref();
+  let dead = null; // an unhandled 'error' event on a Worker would crash the whole process
+  worker.on('error', e => { dead = e; console.error('[db] Postgres worker error:', e); });
+  worker.on('exit', code => { if (code) dead = dead || new Error('Postgres worker exited with code ' + code); });
 
   const names = [...tables, 'journals', 'ledger', 'idempotency', 'meta'].join('|');
   const re = new RegExp(`\\b(FROM|INTO|JOIN|UPDATE)\\s+(${names})\\b`, 'gi');
   const qualify = sql => sql.replace(re, `$1 ${SCHEMA}.$2`);
 
   function call(sql, params = []) {
+    if (dead) throw new Error('Database connection worker stopped: ' + dead.message);
     Atomics.store(signal, 0, 0);
     port1.postMessage({ sql, params });
     if (Atomics.wait(signal, 0, 0, TIMEOUT_MS) === 'timed-out') throw new Error('Database did not respond in time.');

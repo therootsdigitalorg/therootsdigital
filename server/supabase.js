@@ -7,10 +7,18 @@
      with the issuer pinned to this project.
    - API keys (apikey: sb_publishable_… / sb_secret_…) are checked against the configured keys.
    The secret key is used only server-side and is never returned to any client. */
-const { verifyAuth, createAdminClient, createContextClient } = require('@supabase/server/core');
+/* Loaded on first use: @supabase/server depends on the ESM-only jose v6, which needs a Node version that supports
+   require(esm) (22.12+). Loading lazily means a runtime problem here can only affect /sb-api, never the whole app. */
+const { HttpError } = require('./util');
+let core = null;
+function lib() {
+  if (core) return core;
+  try { core = require('@supabase/server/core'); }
+  catch (e) { console.error('[supabase] @supabase/server failed to load:', e); throw new HttpError(503, 'supabase_unavailable', `Supabase server library could not load on Node ${process.version}: ${e.message.split('\n')[0]}`); }
+  return core;
+}
 const config = require('./config');
 const store = require('./db');
-const { HttpError } = require('./util');
 
 const env = k => String(process.env[k] || '').trim();
 const projectUrl = () => env('SUPABASE_URL').replace(/\/$/, '');
@@ -32,7 +40,7 @@ function toRequest(ctx) {
 /** Verify the caller. auth: 'user' | 'publishable' | 'secret' | array. Throws HttpError on failure. */
 async function authenticate(ctx, auth = 'user') {
   if (!projectUrl()) throw new HttpError(503, 'supabase_not_configured', 'Supabase is not configured on this server (SUPABASE_URL).');
-  const { data, error } = await verifyAuth(toRequest(ctx), { auth, issuer: `${projectUrl()}/auth/v1` });
+  const { data, error } = await lib().verifyAuth(toRequest(ctx), { auth, issuer: `${projectUrl()}/auth/v1` });
   if (error) {
     const st = error.status || 401;
     throw new HttpError(st >= 500 ? 503 : st, String(error.code || 'supabase_auth_failed').toLowerCase(), error.message || 'Supabase authentication failed.');
@@ -41,8 +49,8 @@ async function authenticate(ctx, auth = 'user') {
   return data;
 }
 
-const admin = () => createAdminClient();
-const asUser = token => createContextClient({ auth: { token } });
+const admin = () => lib().createAdminClient();
+const asUser = token => lib().createContextClient({ auth: { token } });
 
 /** Digital Hub account linked to a Supabase user: same email, and Supabase confirms the user owns that email. */
 async function linkedAccount(claims) {
