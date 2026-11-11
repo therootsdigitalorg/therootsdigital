@@ -145,6 +145,18 @@ async function launch() {
     await waitFor(`/UI test hoodie/.test(document.querySelector('#main').innerText)`); noErrors('link');
   });
 
+  await step('Merchant: uploads a KYB document through the file picker (Go live → Verification documents)', async () => {
+    const pdf = path.join(tmp, 'llc-certificate.pdf'); fs.writeFileSync(pdf, '%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF');
+    await evaluate("location.hash = '#/golive'"); await pageOk('golive');
+    await waitFor("!!document.querySelector('input[type=file][data-type=company_registration]')", 8000, 'upload input');
+    const { root } = await b.send('DOM.getDocument', { depth: -1 });
+    const { nodeId } = await b.send('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file][data-type=company_registration]' });
+    await b.send('DOM.setFileInputFiles', { nodeId, files: [pdf] });
+    await waitFor("/Document uploaded/.test(document.body.innerText)", 10000, 'upload toast');
+    await waitFor("/llc-certificate\\.pdf/.test(document.querySelector('#main').innerText)", 10000, 'uploaded row'); await shot('merchant-documents');
+    noErrors('documents');
+  });
+
   /* ================= customer checkout with MetaMask ================= */
   const r = await fetch(BASE + '/v1/checkout/sessions', { method: 'POST', headers: { Authorization: 'Bearer ' + secretKey, 'content-type': 'application/json' }, body: JSON.stringify({ amount: 2500, currency: 'USD', description: 'UI order #77', payment_methods: ['usdc'], customer_email: 'ui@example.com', metadata: { order_id: '77' }, success_url: 'https://shop.example/thanks' }) }).then(r => r.json());
   await step('Checkout: connect → switch network → sign → pay → verifying → paid (real page, simulated MetaMask)', async () => {
@@ -239,6 +251,22 @@ async function launch() {
     await waitFor("/Store connected/.test(document.querySelector('#dlg').innerText)", 10000, 'connected modal'); await shot('a-woo-connected');
     const txt = await evaluate("document.querySelector('#dlg').innerText"); assert.match(txt, /dh_test_sk_/); assert.match(txt, /whsec_/); assert.match(txt, /wc-api\/digitalhub/);
     await evaluate("document.querySelector('#dlg').close()"); noErrors('store connect');
+  });
+  await step('Admin: merchant drawer lists the uploaded document; Verify works; approval blockers are listed', async () => {
+    await evaluate("location.hash = '#/a-merchants'"); await pageOk('a-merchants');
+    await evaluate("[...document.querySelectorAll('#main tr.click')].find(r => /Northwind/.test(r.innerText)).click()");
+    await waitFor("!!document.querySelector('#drBody') && !document.querySelector('#drBody .loading')", 8000, 'merchant drawer');
+    await click('#drBody [role=tab][data-tab="verify"]'); await waitFor("/llc-certificate\\.pdf/.test(document.querySelector('#drBody').innerText)", 10000, 'document in drawer');
+    await click('#drBody [data-act=adminDocReview][data-s=verified]'); await waitFor("/Document verified/.test(document.body.innerText)", 8000, 'verified toast');
+    // regression: tables inside the drawer used to collapse to 0px (owners + Verify ID buttons invisible)
+    const heights = await evaluate("[...document.querySelectorAll('#drBody .table-wrap')].map(w => Math.round(w.getBoundingClientRect().height))");
+    assert.ok(heights.length >= 2 && heights.every(h => h > 30), 'drawer tables have real height: ' + heights.join(','));
+    assert.match(await evaluate("document.querySelector('#drBody').innerText"), /Abdul Rahman Ansari/, 'owners visible');
+    // production rule: staff without 2FA see a clear lock banner with a link to set it up
+    await evaluate("App.me.config.requireStaffMfa = true; refreshDrawer()"); await waitFor("/Approval controls are locked/.test(document.querySelector('#drBody').innerText)", 8000, '2FA lock banner');
+    assert.ok(await evaluate("!!document.querySelector('#drBody a[href=\"#/account\"]')")); await shot('a-merchant-2fa-locked');
+    await evaluate("App.me.config.requireStaffMfa = false");
+    await shot('a-merchant-documents'); await click('#drawerHost .x'); noErrors('admin documents');
   });
   await step('Responsive: admin console has no horizontal page scroll at phone width', async () => {
     await b.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });

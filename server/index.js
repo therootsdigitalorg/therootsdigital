@@ -104,7 +104,7 @@ async function runRouteInner(req, match, ctx, pathname, cookiesOut, extraHeaders
     if (out?.file) return { file: out.file, type: out.type };
     if (out?.redirect) return { status: 303, body: '', headers: { location: out.redirect, ...extraHeaders } };
     if (out?.html) return { status: out.status || 200, body: out.html, headers: { 'content-type': 'text/html; charset=utf-8' } };
-    if (out?.buffer) return { status: 200, body: out.buffer, headers: { 'content-type': out.type, 'content-disposition': `attachment; filename="${out.name}"` } };
+    if (out?.buffer) return { status: 200, body: out.buffer, headers: { 'content-type': out.type, 'cache-control': out.private ? 'private, no-store' : 'no-cache', 'content-disposition': `${out.inline ? 'inline' : 'attachment'}; filename="${String(out.name).replace(/["\r\n]/g, '_')}"` } };
     const wrapped = out && out.status && out.body !== undefined;
     return { status: wrapped ? out.status : 200, body: JSON.stringify((wrapped ? out.body : out) ?? {}), headers: { ...JSON_TYPE, 'cache-control': 'no-store', ...extraHeaders } };
   } catch (e) { if (cookiesOut.length) extraHeaders['Set-Cookie'] = cookiesOut; return errorResult(e, extraHeaders); }
@@ -152,7 +152,8 @@ async function handle(req, res) {
   let raw = '';
   if (req.method !== 'GET') {
     try {
-      raw = await new Promise((resolve, reject) => { let size = 0; const chunks = []; req.on('data', c => { size += c.length; if (size > 1e6) { reject(new HttpError(413, 'payload_too_large', 'Body too large')); req.destroy(); } else chunks.push(c); }); req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))); req.on('error', reject); });
+      raw = await new Promise((resolve, reject) => { let size = 0; const chunks = []; const limit = /\/documents\/?$/.test(pathname) ? 6e6 : 1e6; // document uploads (≤3 MB file, base64) — Vercel caps requests at 4.5 MB
+      req.on('data', c => { size += c.length; if (size > limit) { reject(new HttpError(413, 'payload_too_large', 'Body too large')); req.destroy(); } else chunks.push(c); }); req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8'))); req.on('error', reject); });
     } catch (e) { return finish(errorResult(e)); }
   }
   let body = {};

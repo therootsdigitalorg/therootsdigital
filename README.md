@@ -149,6 +149,18 @@ Webhooks carry `DigitalHub-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t + "." +
   finality, sandbox/live switch with production checks, and an **API diagnostics** tab.
   - **What diagnostics show:** database latency, 24-hour API calls/errors/latency, webhook delivery health, monitor and RPC status, merchant wallet verification counts, and recent RPC errors.
 
+## Merchant verification (KYB) documents
+
+Merchants upload documents under **Go live → Verification documents**; staff can also upload on their behalf from the merchant drawer.
+- **Required:** an ID card or passport for every owner, a company registration (LLC / incorporation certificate) and proof of business address.
+- **Optional:** tax registration, ownership structure, and other files.
+- **File checks:** files are validated by their content (PDF / JPEG / PNG / WebP, max 3 MB) and **encrypted at rest** with `APP_ENCRYPTION_KEY`.
+- **Access:** merchants see only their own files. Staff with *merchants.manage* view, verify or reject them (a rejection reason is shown to the merchant), and every staff view is audited.
+- **Effect on the KYB checklist:** verifying an owner's ID marks that owner verified, and verifying the registration ticks the registration check.
+- **Approval** needs every KYB check, every owner verified, AML clear and every required document verified. The drawer lists exactly what is still missing.
+
+**Staff 2FA:** in production every privileged action requires two-factor authentication. Until an admin enrols (Your security → Set up 2FA), approval controls are disabled, and the merchant drawer shows a banner saying so.
+
 ## Sandbox cards
 
 Super Admin → Settings → MetaMask → **Card payments (sandbox test cards)** adds a **Card** tab to checkout next to

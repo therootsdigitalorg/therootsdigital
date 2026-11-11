@@ -21,7 +21,7 @@ const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'];
 const EXPLORER = { base_sepolia: 'https://sepolia.basescan.org', base: 'https://basescan.org' };
 
 const TONE = {
-  ok: ['settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
+  ok: ['verified_doc', 'settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
   accent: ['captured'],
   info: ['authorized', 'confirming', 'processing', 'awaiting_payment', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test', 'verifying', 'sandbox', 'tx_submitted', 'tx_discovered', 'detected'],
   warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid', 'requires_action', 'pending_signature', 'verified', 'attention', 'canceled', 'expired', 'reorg'],
@@ -62,6 +62,26 @@ function balanceCards(bal) {
   return `<div class="grid g4">${curs.map(c => { const b = bal[c]; return `<div class="card kpi"><div class="row" style="justify-content:space-between"><span class="label">${c} balance</span><span class="tag">${CRYPTO.includes(c) ? 'stablecoin' : 'fiat'}</span></div>
     <div class="value">${fmt(b.available, c)}</div><div class="sub">available</div><div class="divider" style="margin:10px 0"></div>${kv([['Pending', fmt(b.pending, c)], ['Reserve', fmt(b.reserve, c)], ['Payout hold', fmt(b.hold, c)]])}</div>`; }).join('')}</div>`;
 }
+
+/* ---------------- files (KYB documents) ---------------- */
+const DOC_ACCEPT = 'application/pdf,image/jpeg,image/png,image/webp';
+function readFileB64(file, maxBytes = 3 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    if (!file) return reject(new Error('Choose a file.'));
+    if (file.size > maxBytes) return reject(new Error(`${file.name} is ${(file.size / 1048576).toFixed(1)} MB — files must be 3 MB or smaller.`));
+    const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1]); r.onerror = () => reject(new Error('Could not read the file.')); r.readAsDataURL(file);
+  });
+}
+/** Fetch a session-protected file and open it in a new tab (blob URL; nothing is cached by the browser). */
+async function openProtected(path, name) {
+  const w = window.open('', '_blank'); // open synchronously so pop-up blockers allow it
+  const r = await fetch(path + (path.includes('?') ? '&' : '?') + 'inline=1', { credentials: 'same-origin', headers: { 'X-DH-Mode': App.mode } });
+  if (!r.ok) { if (w) w.close(); const d = await r.json().catch(() => ({})); throw new Error(d.error?.message || 'Could not open the file.'); }
+  const url = URL.createObjectURL(await r.blob());
+  if (w) w.location = url; else { const a = document.createElement('a'); a.href = url; a.download = name || 'document'; a.click(); }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+const fileSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
 
 /* ---------------- API client ---------------- */
 async function api(method, path, body) {

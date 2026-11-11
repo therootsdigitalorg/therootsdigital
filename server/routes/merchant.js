@@ -195,6 +195,13 @@ function routes(r) {
   M('POST', '/deliveries/:id/retry', 'developers', (ctx, c) => { const d = mine('deliveries', ctx.params.id, c); d.status = 'pending'; d.next_at = Date.now(); store.put('deliveries', d); core.runDeliveries(); return { ok: true }; });
   M('GET', '/events', 'developers', (ctx, c) => store.list('events', { merchant_id: c.m.id, mode: c.mode }, { limit: 100 }).map(core.publicEvent));
 
+  /* ---- verification documents (KYB / KYC) ---- */
+  const DOCS = require('../documents');
+  M('GET', '/documents', 'read', (ctx, c) => ({ ...DOCS.requirements(c.m), types: Object.entries(DOCS.TYPES).map(([k, t]) => ({ type: k, ...t })), owners: c.m.kyb.owners.map((o, i) => ({ index: i, name: o.name })), max_bytes: DOCS.MAX_BYTES }));
+  M('POST', '/documents', 'settings', (ctx, c) => DOCS.publicDoc(DOCS.upload(c.m, ctx.body, c.actor)));
+  M('GET', '/documents/:id/file', 'read', (ctx, c) => { const d = mine('documents', ctx.params.id, c, false); if (!d.data) throw new HttpError(404, 'not_found', 'File deleted.'); return { ...DOCS.file(d), inline: ctx.query.inline === '1', private: true }; });
+  M('DELETE', '/documents/:id', 'settings', (ctx, c) => DOCS.publicDoc(DOCS.remove(mine('documents', ctx.params.id, c, false), c.actor)));
+
   /* ---- go live ---- */
   M('GET', '/onboarding', 'read', (ctx, c) => ({ steps: onboarding(c.m), kyb: c.m.kyb, status: c.m.status, providers: c.m.providers, provider_info: P.PROVIDER_INFO, live_ready: core.liveReady(c.m), non3ds: c.m.non3ds,
     requests: store.list('provider_requests', { merchant_id: c.m.id }) }));

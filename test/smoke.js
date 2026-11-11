@@ -315,12 +315,36 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
   });
   await step('Merchant: restricted key secret shown once and stored hashed', async () => { const r = ok(await m('POST', '/m-api/keys', { name: 'Woo', scopes: ['checkout:write', 'payments:read'] })); const row = store.byKey('api_keys', require('../server/util').sha256(r.secret)); assert.ok(row && !JSON.stringify(row).includes(r.secret)); });
   await step('Payment link redirects to a fresh USDC checkout', async () => { const l = ok(await m('POST', '/m-api/links', { amount: 1500, currency: 'USD', description: 'Link test', reusable: true, payment_methods: ['usdc'] })); const r = await pub('GET', new URL(l.url).pathname); assert.equal(r.status, 303); assert.match(r.headers.get('location'), /^\/pay\/cs_/); });
-  await step('Admin: KYB approval blocked until checks + KYC + AML complete', async () => {
+  const PDF = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF').toString('base64'), PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]).toString('base64');
+  await step('Documents: merchant uploads KYB documents; content-checked, size-limited, encrypted, tenant-isolated', async () => {
+    const d0 = ok(await m('GET', '/m-api/documents')); assert.ok(d0.items.some(i => i.type === 'company_registration')); assert.ok(d0.items.filter(i => i.type === 'owner_id').length >= 2);
+    const fake = await m('POST', '/m-api/documents', { type: 'company_registration', filename: 'llc.pdf', data: Buffer.from('this is not a pdf').toString('base64') }); assert.equal(fake.body.error.code, 'file_type_invalid', 'renamed text file refused');
+    const big = await m('POST', '/m-api/documents', { type: 'company_registration', filename: 'big.pdf', data: Buffer.concat([Buffer.from('%PDF-'), Buffer.alloc(3 * 1024 * 1024)]).toString('base64') }); assert.ok([400, 413].includes(big.status), 'over 3 MB refused');
+    const up = ok(await m('POST', '/m-api/documents', { type: 'company_registration', filename: 'Northwind LLC certificate.pdf', data: PDF })); assert.equal(up.status, 'pending'); assert.equal(up.content_type, 'application/pdf');
+    const id1 = ok(await m('POST', '/m-api/documents', { type: 'owner_id', owner_index: 0, filename: 'id.png', data: PNG })); assert.equal(id1.content_type, 'image/png');
+    const raw = JSON.stringify(store.get('documents', up.id)); assert.ok(!raw.includes(PDF) && !raw.includes('%PDF'), 'stored encrypted');
+    const f = await fetch(BASE + `/m-api/documents/${up.id}/file`, { headers: { cookie: '' } }); assert.equal(f.status, 401);
+    const own = await m('GET', `/m-api/documents/${up.id}/file`); assert.equal(own.status, 200);
+  });
+  await step('Admin: KYB approval needs checks + owner IDs + AML + verified documents; staff document views are audited', async () => {
     const indus = ok(await a('GET', '/a-api/merchants?q=Indus'))[0];
     assert.equal((await a('POST', `/a-api/merchants/${indus.id}/status`, { status: 'approved' })).status, 400);
-    for (const check of ['registration', 'website', 'bank']) await a('POST', `/a-api/merchants/${indus.id}/kyb`, { check, value: true });
-    await a('POST', `/a-api/merchants/${indus.id}/kyb`, { owner: 0, idStatus: 'verified' }); await a('POST', `/a-api/merchants/${indus.id}/kyb`, { owner: 1, idStatus: 'verified' }); await a('POST', `/a-api/merchants/${indus.id}/kyb`, { aml: true });
+    for (const check of ['website', 'bank']) await a('POST', `/a-api/merchants/${indus.id}/kyb`, { check, value: true });
+    await a('POST', `/a-api/merchants/${indus.id}/kyb`, { aml: true });
+    const docs = [ok(await a('POST', `/a-api/merchants/${indus.id}/documents`, { type: 'company_registration', filename: 'secp.pdf', data: PDF })),
+      ok(await a('POST', `/a-api/merchants/${indus.id}/documents`, { type: 'owner_id', owner_index: 0, filename: 'hira.png', data: PNG })),
+      ok(await a('POST', `/a-api/merchants/${indus.id}/documents`, { type: 'owner_id', owner_index: 1, filename: 'kamran.png', data: PNG }))];
+    let det = ok(await a('GET', `/a-api/merchants/${indus.id}`)); assert.equal(det.kyb_ready, false); assert.ok(det.documents.items.some(i => i.type === 'proof_of_address' && i.status === 'missing'));
+    const v = await a('GET', `/a-api/documents/${docs[0].id}/file`); assert.equal(v.status, 200);
+    assert.ok(ok(await a('GET', '/a-api/audit?q=document.view')).some(e => e.target === docs[0].id), 'staff view audited');
+    const rej = ok(await a('POST', `/a-api/documents/${docs[1].id}/review`, { status: 'rejected', note: 'ID expired' })); assert.equal(rej.status, 'rejected');
+    assert.equal((await a('POST', `/a-api/documents/${docs[2].id}/review`, { status: 'rejected' })).status, 400, 'rejection needs a reason');
+    const again = ok(await a('POST', `/a-api/merchants/${indus.id}/documents`, { type: 'owner_id', owner_index: 0, filename: 'hira-new.png', data: PNG }));
+    const addr = ok(await a('POST', `/a-api/merchants/${indus.id}/documents`, { type: 'proof_of_address', filename: 'bill.pdf', data: PDF }));
+    for (const dd of [docs[0], docs[2], again, addr]) ok(await a('POST', `/a-api/documents/${dd.id}/review`, { status: 'verified' }));
+    det = ok(await a('GET', `/a-api/merchants/${indus.id}`)); assert.equal(det.merchant.kyb.owners.every(o => o.idStatus === 'verified'), true, 'verified IDs mark owners verified'); assert.equal(det.kyb_ready, true, JSON.stringify(det.documents.items));
     assert.equal(ok(await a('POST', `/a-api/merchants/${indus.id}/status`, { status: 'approved' })).status, 'approved');
+    const added = ok(await a('POST', `/a-api/merchants/${indus.id}/owners`, { name: 'New Partner', pct: 0 })); assert.equal(added.kyb.owners.length, 3);
   });
   await step('Admin: maker-checker blocks self-approval of adjustments', async () => { const nw = ok(await a('GET', '/a-api/merchants?q=Northwind'))[0]; const adj = ok(await a('POST', '/a-api/adjustments', { merchant: nw.id, mode: 'test', currency: 'USD', amount: 500, reason: 'Smoke test goodwill credit' })); assert.equal((await a('POST', `/a-api/adjustments/${adj.id}/approve`)).status, 400); });
   await step('Admin: Supabase Auth admin profile grants the Super Admin dashboard', async () => {
@@ -434,6 +458,8 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     ok(await a('POST', `/a-api/merchants/${mid}/webhooks/${hook.id}/delete`));
     const owner = client(); ok(await owner('POST', '/auth/login', { email: 'owner@solvexs.test', password: nm.temporary_password }));
     assert.ok(ok(await owner('GET', '/m-api/keys')).keys.length >= 2, 'merchant sees the keys in Developers & API');
+    const nwDoc = store.list('documents', {}).find(d => d.filename === 'Northwind LLC certificate.pdf');
+    assert.equal((await owner('GET', `/m-api/documents/${nwDoc.id}/file`)).status, 404, 'another merchant cannot open Northwind documents');
   });
   await step('MetaMask & Blockchain: Infura first with public failover, keys masked; diagnostics; SDK self-hosted', async () => {
     const C = require('../server/chain'), saved = process.env.BASE_SEPOLIA_RPC_URLS;

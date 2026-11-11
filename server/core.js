@@ -58,7 +58,8 @@ function newMerchant({ name, legal_name, country, website, support_email }) {
   };
 }
 const merchant = mid => { const m = store.get('merchants', mid); if (!m) throw new HttpError(404, 'not_found', 'Merchant not found'); return m; };
-const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners.length > 0 && m.kyb.owners.every(o => o.idStatus === 'verified') && m.kyb.aml.status === 'clear';
+const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners.length > 0 && m.kyb.owners.every(o => o.idStatus === 'verified') && m.kyb.aml.status === 'clear'
+  && require('./documents').requirements(m).complete; // every required document (owner IDs, company registration, proof of address) verified
 function liveReady(m) {
   if (!config.livePayments) return 'Live payments are switched off on this platform (LIVE_PAYMENTS=0).';
   if (require('./chain').settings().platformMode !== 'live') return 'Base Mainnet is not switched on yet (Super Admin → Settings → MetaMask).';

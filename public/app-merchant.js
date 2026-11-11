@@ -339,7 +339,8 @@ VIEWS.integrations = async () => {
 
 /* ---------------- go live ---------------- */
 VIEWS.golive = async () => {
-  const d = await api('GET', '/m-api/onboarding'), done = d.steps.filter(s => s.done).length, k = d.kyb, b = k.business || {};
+  const [d, docs] = await Promise.all([api('GET', '/m-api/onboarding'), api('GET', '/m-api/documents')]), done = d.steps.filter(s => s.done).length, k = d.kyb, b = k.business || {};
+  App.cache.docs = docs;
   const ownersRows = (k.owners.length ? k.owners : [{}]).map((o, i) => ownerRow(o, i)).join('');
   return head('Business', 'Go live', 'Complete verification, verify your receiving wallet and pass the checklist. Digital Hub compliance reviews each step before Base mainnet payments.')
     + `<div class="split"><div class="card"><div class="card-head"><h2>Checklist</h2>${badge(done === d.steps.length ? 'done' : 'pending', `${done}/${d.steps.length}`)}</div><div class="progress" style="margin-bottom:12px"><div style="width:${Math.round(done / d.steps.length * 100)}%"></div></div>
@@ -353,8 +354,29 @@ VIEWS.golive = async () => {
       <label class="field full"><span>What do you sell?</span><textarea name="description" required>${esc(b.description || '')}</textarea></label>${field('Expected monthly volume (USD)', input('monthly_volume_usd', { type: 'number', value: b.monthly_volume_usd || '' }))}</div>
       <h3>Beneficial owners (25%+)</h3><div class="stack" id="owners">${ownersRows}</div><div><button type="button" class="btn sm ghost" data-act="addOwnerRow">Add owner</button></div>
       <p class="faint">Digital Hub will request ID documents for each owner by email. Do not upload documents here.</p><div class="err" id="formErr"></div>
-      <div><button class="btn primary" type="submit" ${d.status === 'approved' ? 'disabled' : ''}>${k.submitted ? 'Update submission' : 'Submit for review'}</button></div></form>`;
+      <div><button class="btn primary" type="submit" ${d.status === 'approved' ? 'disabled' : ''}>${k.submitted ? 'Update submission' : 'Submit for review'}</button></div></form>`
+    + docsCard(docs, d.status);
 };
+/* ---- KYB documents ---- */
+function docsCard(docs, status) {
+  const up = can('settings'); // also after approval: renewed IDs, address changes, compliance requests (verified files stay locked)
+  const pick = (type, owner) => up ? `<label class="btn sm ${owner === undefined ? '' : ''}" style="cursor:pointer">Upload<input type="file" accept="${DOC_ACCEPT}" hidden data-change="docUpload" data-type="${type}" data-owner="${owner ?? ''}"></label>` : '';
+  return `<div class="card stack"><div class="card-head" style="margin:0"><h2>Verification documents</h2>${badge(docs.complete ? 'verified' : 'pending', docs.complete ? 'all verified' : 'required for approval')}</div>
+    <p class="muted">Upload clear scans or photos (PDF, JPEG, PNG or WebP, up to 3 MB each). Files are encrypted and only Digital Hub compliance can open them.</p>
+    ${docs.owners.length ? '' : note('warn', 'Add owners first', 'List every owner with 25% or more in the form above and save it — then upload an ID for each.')}
+    ${table([{ h: 'Required document', v: i => esc(i.label) }, { h: 'Status', v: i => badge(i.status === 'missing' ? 'pending' : i.status, i.status) }, { h: '', v: i => i.status === 'verified' ? '' : i.owner_index === null && i.type === 'owner_id' ? '' : pick(i.type, i.owner_index) }], docs.items, { empty: 'Add owners to see the checklist.' })}
+    <div class="row"><span class="faint">Optional:</span>${docs.types.filter(t => !t.required).map(t => up ? `<label class="btn sm ghost" style="cursor:pointer">${esc(t.label)}<input type="file" accept="${DOC_ACCEPT}" hidden data-change="docUpload" data-type="${t.type}" data-owner=""></label>` : '').join('')}</div>
+    ${docs.documents.length ? '<h3>Uploaded</h3>' + table([{ h: 'Document', v: x => `${esc(x.label)}${x.owner_index != null && docs.owners[x.owner_index] ? ' · ' + esc(docs.owners[x.owner_index].name) : ''}<div class="faint" style="font-size:.72rem">${esc(x.filename)} · ${fileSize(x.size)} · ${fmtDT(x.created)}</div>` },
+      { h: 'Status', v: x => badge(x.status) + (x.review?.note ? `<div class="faint" style="font-size:.72rem">${esc(x.review.note)}</div>` : '') },
+      { h: '', v: x => `<div class="row" style="flex-wrap:nowrap"><button class="btn sm" data-act="docView" data-id="${x.id}" data-name="${esc(x.filename)}">View</button>${x.status !== 'verified' && up ? `<button class="btn sm ghost" data-act="docDelete" data-id="${x.id}">Delete</button>` : ''}</div>` }], docs.documents) : ''}</div>`;
+}
+ACT.docUpload = (d, el) => run(async () => {
+  const f = el.files[0]; if (!f) return;
+  const data = await readFileB64(f, App.cache.docs?.max_bytes);
+  await api('POST', '/m-api/documents', { type: d.type, owner_index: d.owner === '' ? undefined : +d.owner, filename: f.name, data });
+}, { ok: 'Document uploaded — Digital Hub will review it' });
+ACT.docView = d => run(() => openProtected('/m-api/documents/' + d.id + '/file', d.name), { noRefresh: true });
+ACT.docDelete = d => confirmBox('Delete this upload?', 'You can upload a new file afterwards.', 'Delete', () => api('DELETE', '/m-api/documents/' + d.id));
 const ownerRow = (o, i) => `<div class="form-grid" data-owner="${i}" style="grid-template-columns:2fr 1fr 1fr 1fr">${field('Full name', `<input type="text" data-o="name" value="${esc(o.name || '')}">`)}${field('Ownership %', `<input type="number" data-o="pct" min="0" max="100" value="${esc(o.pct ?? '')}">`)}${field('Date of birth', `<input type="date" data-o="dob" value="${esc(o.dob || '')}">`)}${field('Nationality', `<input type="text" data-o="nationality" maxlength="2" placeholder="US" value="${esc(o.nationality || '')}">`)}</div>`;
 ACT.addOwnerRow = () => { const box = $('#owners'); box.insertAdjacentHTML('beforeend', ownerRow({}, box.children.length)); };
 FORM.kyb = async (f, form) => { f.owners = $$('[data-owner]', form).map(r => Object.fromEntries($$('[data-o]', r).map(i => [i.dataset.o, i.value]))).filter(o => o.name); await api('POST', '/m-api/kyb', f); toast('Submitted. Digital Hub compliance will review it.'); await loadMe(); };

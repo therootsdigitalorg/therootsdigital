@@ -59,7 +59,7 @@ function routes(r) {
   });
   A('GET', '/merchants/:id', null, (ctx, c) => {
     const m = get('merchants', ctx.params.id);
-    return { merchant: m, kyb_ready: core.kybReady(m), live_ready: core.liveReady(m), balances: { test: L.merchantBalances(m.id, 'test'), live: L.merchantBalances(m.id, 'live') },
+    return { merchant: m, kyb_ready: core.kybReady(m), documents: require('../documents').requirements(m), live_ready: core.liveReady(m), balances: { test: L.merchantBalances(m.id, 'test'), live: L.merchantBalances(m.id, 'live') },
       users: store.list('users', { merchant_id: m.id }).map(auth.publicUser), keys: store.list('api_keys', { merchant_id: m.id }).map(k => ({ id: k.id, mode: k.mode, type: k.type, name: k.name, prefix: k.prefix, last4: k.last4, status: k.status, last_used: k.last_used, created_at: k.created_at })),
       requests: store.list('provider_requests', { merchant_id: m.id }), summary: merchantSummary(m, c.mode), wallets: store.list('merchant_wallets', { merchant_id: m.id }, { limit: 100 }).map(usdc.publicWallet), receiving: m.receiving || {},
       direct: { test: usdc.directBalances(m.id, 'test'), live: usdc.directBalances(m.id, 'live') }, webhooks: store.list('webhook_endpoints', { merchant_id: m.id }).map(e => ({ id: e.id, mode: e.mode, url: e.url, status: e.status })) };
@@ -172,6 +172,20 @@ function routes(r) {
       webhook_url: hook, key_id: key.id, endpoint_id: ep.id, receiving_wallet: !!require('../usdc').receivingWallet(m, mode) };
   });
   A('POST', '/merchants/:id/webhooks/:ep/delete', 'merchants.controls', (ctx, c) => { const e = get('webhook_endpoints', ctx.params.ep); if (e.merchant_id !== ctx.params.id) throw bad('Endpoint mismatch.'); store.del('webhook_endpoints', e.id); core.audit(c.actor, 'webhook_endpoint.delete_by_admin', e.id, e.url, e.merchant_id); return { ok: true }; });
+
+  /* ---- KYB documents & owners ---- */
+  const DOCS = require('../documents');
+  A('POST', '/merchants/:id/documents', 'merchants.manage', (ctx, c) => DOCS.publicDoc(DOCS.upload(get('merchants', ctx.params.id), ctx.body, c.actor + ' (staff)')));
+  A('GET', '/documents/:id/file', 'merchants.manage', (ctx, c) => { const d = get('documents', ctx.params.id); if (!d.data) throw new HttpError(404, 'not_found', 'File deleted.'); core.audit(c.actor, 'document.view', d.id, d.type, d.merchant_id); return { ...DOCS.file(d), inline: ctx.query.inline === '1', private: true }; });
+  A('POST', '/documents/:id/review', 'merchants.manage', (ctx, c) => DOCS.publicDoc(DOCS.review(get('documents', ctx.params.id), String(ctx.body.status), ctx.body.note, c.actor)));
+  A('POST', '/merchants/:id/owners', 'merchants.manage', (ctx, c) => {
+    const m = get('merchants', ctx.params.id), b = ctx.body, name = U.str(b.name, 120), pct = Math.min(100, Math.max(0, +b.pct || 0));
+    if (name.length < 2) throw bad('Enter the owner\'s full name.');
+    if (m.kyb.owners.reduce((s, o) => s + (o.pct || 0), 0) + pct > 100) throw bad('Ownership cannot exceed 100%.');
+    m.kyb.owners.push({ name, pct, dob: U.str(b.dob, 10), nationality: U.str(b.nationality, 2).toUpperCase(), idStatus: 'pending', added_by: c.actor });
+    m.kyb.checks.owners = false;
+    return saveM(m, c, 'merchant.owner_add', name);
+  });
 
   A('POST', '/merchants/:id/keys/:key/revoke', 'merchants.controls', (ctx, c) => { const k = get('api_keys', ctx.params.key); if (k.merchant_id !== ctx.params.id) throw bad('Key mismatch.'); k.status = 'revoked'; store.put('api_keys', k); core.audit(c.actor, 'api_key.revoke_by_admin', k.id, '', k.merchant_id); return { ok: true }; });
   A('POST', '/merchants/:id/users/:user/status', 'merchants.manage', (ctx, c) => { const u = get('users', ctx.params.user); if (u.merchant_id !== ctx.params.id) throw bad('User mismatch.'); u.status = ctx.body.active ? 'active' : 'disabled'; store.put('users', u); core.audit(c.actor, 'merchant_user.' + u.status, u.email, '', u.merchant_id); return auth.publicUser(u); });
