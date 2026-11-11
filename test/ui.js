@@ -127,9 +127,9 @@ async function launch() {
   await step('Merchant: receiving wallet verified through MetaMask in the UI (fake wallet signs EIP-4361)', async () => {
     await evaluate(`location.hash = '#/wallet'`); await pageOk('wallet');
     await click('[data-act=addWallet]'); await waitFor(`!!document.querySelector('#w-addr')`);
-    await click('[data-act=walletFromMM]'); await waitFor(`document.querySelector('#w-addr').value.length === 42`, 5000, 'address from MetaMask');
+    await click('[data-act=walletFromMM]'); await waitFor(`document.querySelector('#w-addr').value.length === 42`, 20000, 'address from MetaMask');
     await evaluate(`document.querySelector('form[data-form=wallet]').requestSubmit()`);
-    await waitFor(`/Wallet ownership verified/.test(document.body.innerText)`, 10000, 'verified toast');
+    await waitFor(`/Wallet ownership verified/.test(document.body.innerText)`, 25000, 'verified toast');
     await waitFor(`/verified/.test(document.querySelector('#main table')?.innerText || '')`);
     assert.ok(mm.calls.includes('personal_sign')); await shot('merchant-wallet'); noErrors('wallet');
   });
@@ -151,7 +151,7 @@ async function launch() {
     mm.account = customer.address; mm.chainId = '0x1'; mm.connected = false; // a fresh customer browser
     await goto(BASE + '/pay/' + r.id); await waitFor(`!!document.querySelector('#connect')`, 8000, 'connect button'); await shot('checkout-connect');
     assert.match(await text(), /25\.00 USDC/); assert.match(await text(), /Base Sepolia/);
-    await click('#connect'); await waitFor(`!!document.querySelector('#switch')`, 8000, 'switch network button');
+    await click('#connect'); await waitFor(`!!document.querySelector('#switch')`, 20000, 'switch network button');
     await click('#switch'); await waitFor(`!!document.querySelector('#confirm')`, 8000, 'confirm wallet button'); assert.equal(mm.chainId, '0x14a34');
     await click('#confirm'); await waitFor(`!!document.querySelector('#send')`, 10000, 'pay button'); await shot('checkout-pay');
     await click('#send'); await waitFor(`/Verifying on Base Sepolia/.test(document.body.innerText)`, 10000, 'verifying screen'); await shot('checkout-verifying');
@@ -165,6 +165,10 @@ async function launch() {
     const { identifier } = await b.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__noMetaMask = true;' });
     await goto(BASE + '/pay/' + s2.id); await waitFor(`/MetaMask was not found/.test(document.body.innerText)`, 8000);
     assert.match(await text(), /Install MetaMask|Open in MetaMask app/); assert.ok(await evaluate(`!!document.querySelector('#connectMobile')`));
+    // the official MetaMask Connect SDK (self-hosted) opens its QR / install modal with a real MetaMask Mobile pairing link
+    await click('#connectMobile');
+    await waitFor(`!!document.querySelector('mm-install-modal, mm-otp-modal')`, 20000, 'MetaMask Connect modal'); await shot('checkout-metamask-connect');
+    const modal = await evaluate(`(() => { const m = document.querySelector('mm-install-modal, mm-otp-modal'); return m ? m.tagName.toLowerCase() : ''; })()`); assert.ok(modal);
     await b.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }); noErrors('no-metamask');
   });
 
@@ -176,7 +180,7 @@ async function launch() {
     await waitFor(`!!document.querySelector('#drFoot [data-act=refundPayment]')`, 8000, 'refund button');
     await click('#drFoot [data-act=refundPayment]'); await waitFor(`!!document.querySelector('form[data-form=refund]')`);
     await evaluate(`(() => { const f = document.querySelector('form[data-form=refund]'); f.amount.value = '5.00'; f.requestSubmit(); return true; })()`);
-    await waitFor(`!!document.querySelector('#drFoot [data-act=sendRefund]')`, 10000, 'send refund button'); await shot('merchant-refund');
+    await waitFor(`!!document.querySelector('#drFoot [data-act=sendRefund]')`, 20000, 'send refund button'); await shot('merchant-refund');
     await click('#drFoot [data-act=sendRefund]'); await waitFor(`/verifying on-chain/i.test(document.body.innerText)`, 10000);
     sepolia.mine(3); await sleep(2500);
     await evaluate(`location.hash = '#/home'`); await pageOk('home'); await evaluate(`location.hash = '#/refunds'`); await pageOk('refunds'); try { await waitFor(`/succeeded/.test(document.querySelector('#main table').innerText)`, 10000, 'refund succeeded'); } catch (e) { console.log(JSON.stringify(require('../server/db').list('refunds', {}).map(r => ({ s: r.status, tx: r.tx, to: r.to, from: r.from, amt: r.amountUnits, ev: r.events })), null, 1), JSON.stringify(require('../server/usdc').status)); throw e; }

@@ -338,7 +338,9 @@ function routes(r) {
       nets[k] = { ...C.walletParams(k), mode: n.mode, enabled: cur.enabled, confirmations: cur.confirmations, finality: cur.finality, quote_minutes: cur.quoteMinutes, usdc: cur.usdc, usdc_canonical: n.usdc, usdc_pinned: n.usdcPinned, min_confirmations: n.minConfirmations,
         rpc_source: C.rpcSource(k), rpc_env_locked: !!process.env[n.envRpc], rpcs: probe ? await C.probe(k) : C.healthView(k), rpc_count: C.rpcUrls(k).length, ws: C.socketView(k), ws_env_locked: !!process.env[n.envWs],
         token: probe ? await C.verifyToken(k, cur.usdc) : (s.tokenChecks?.[k] || null), monitor: usdc.status[k] || null, scan_cursor: store.getMeta('scan:' + k, null) }; }
-    return { platform_mode: s.platformMode, fee_wallet: s.feeWallet, providers: s.providers, networks: nets, rpc_errors: C.rpcErrors.slice(0, 20), live_payments_env: config.livePayments, finality_options: C.FINALITY }; };
+    const sdkFile = require('node:path').join(config.ROOT, 'public/vendor/mm-connect/connect-evm.js'), fsx = require('node:fs');
+    const sdk = { package: '@metamask/connect-evm', version: '2.1.1', path: '/vendor/mm-connect/connect-evm.js', present: fsx.existsSync(sdkFile), bytes: fsx.existsSync(sdkFile) ? fsx.statSync(sdkFile).size : 0, browser_rpc: process.env.INFURA_BROWSER_KEY ? 'Infura (INFURA_BROWSER_KEY, origin-restricted)' : 'public Base endpoint' };
+    return { platform_mode: s.platformMode, fee_wallet: s.feeWallet, providers: s.providers, networks: nets, rpc_errors: C.rpcErrors.slice(0, 20), live_payments_env: config.livePayments, finality_options: C.FINALITY, infura: C.infuraStatus(), sdk }; };
   A('GET', '/chain', null, async (ctx) => chainView(ctx.query.probe === '1'));
   A('POST', '/chain/networks/:key', 'platform.settings', async (ctx, c) => {
     const key = ctx.params.key, n = C.NETWORKS[key]; if (!n) throw bad('Unknown network.');
@@ -379,6 +381,20 @@ function routes(r) {
     if (b.fee_wallet !== undefined) { const a = b.fee_wallet ? E.normalizeAddress(b.fee_wallet) : null; if (b.fee_wallet && !a) throw bad('Fee treasury wallet must be a valid address.'); s.feeWallet = a; }
     C.saveSettings(s); core.audit(c.actor, 'chain.settings_update', 'chain', Object.keys(b).join(',')); return { ok: true, fee_wallet: s.feeWallet }; });
   A('GET', '/chain/production-checks', null, async () => C.productionChecks({ live: true }));
+  /** API diagnostics: one call that answers "is everything healthy?" — no secret values. */
+  A('GET', '/diagnostics', null, async (ctx, c) => {
+    const day = Date.now() - DAY, t0 = Date.now(); store.count('users'); const dbMs = Date.now() - t0;
+    const logs = store.list('api_logs', { since: day }, { limit: 20000 }), errs = logs.filter(l => l.code >= 400), ms = logs.map(l => l.ms).sort((a, b) => a - b);
+    const codes = {}; for (const l of errs) codes[l.error || l.code] = (codes[l.error || l.code] || 0) + 1;
+    const dels = store.list('deliveries', { since: day }, { limit: 20000 });
+    const pays = store.list('payments', { mode: c.mode, since: day }, { limit: 20000 }), byStatus = {}; for (const p of pays) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
+    const rpc = {}; for (const k of Object.keys(C.NETWORKS)) rpc[k] = { source: C.rpcSource(k), endpoints: C.healthView(k), ws: C.socketView(k), monitor: usdc.status[k] || null };
+    return { at: Date.now(), server: { node: process.version, region: process.env.VERCEL_REGION || null, serverless: config.serverless, uptime_s: Math.round(process.uptime()), db: store.usePg ? 'postgres' : 'sqlite', db_latency_ms: dbMs },
+      api_24h: { calls: logs.length, errors: errs.length, error_rate: logs.length ? +(errs.length / logs.length * 100).toFixed(1) : 0, p50_ms: ms[Math.floor(ms.length / 2)] || 0, p95_ms: ms[Math.floor(ms.length * 0.95)] || 0, top_errors: Object.entries(codes).sort((a, b) => b[1] - a[1]).slice(0, 5) },
+      webhooks_24h: { delivered: dels.filter(d => d.status === 'delivered').length, pending: dels.filter(d => d.status === 'pending').length, retrying: dels.filter(d => d.status === 'retrying').length, failed: dels.filter(d => d.status === 'failed').length },
+      payments_24h: byStatus, wallets: { awaiting_signature: store.count('merchant_wallets', { status: 'pending_signature' }), signature_verified: store.count('merchant_wallets', { status: 'verified' }), approved: store.count('merchant_wallets', { status: 'approved' }) },
+      infura: C.infuraStatus(), rpc, rpc_errors: C.rpcErrors.slice(0, 10) };
+  });
   A('POST', '/chain/mode', 'platform.settings', async (ctx, c) => { const s = C.settings(), to = ctx.body.mode === 'live' ? 'live' : 'sandbox';
     if (to === 'live') { const pc = await C.productionChecks({ live: true }); if (!pc.ready) throw bad('Production checks failing: ' + pc.checks.filter(x => x.required && !x.ok).map(x => x.label).join('; ')); s.networks.base.enabled = true; }
     else s.networks.base.enabled = false;

@@ -274,7 +274,7 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     delete process.env.BASE_SEPOLIA_RPC_URLS;
     let r = await a('POST', '/a-api/chain/networks/base_sepolia', { rpc_urls: [wrongUrl] }); assert.equal(r.status, 400); assert.match(r.body.error.message, /not a working Base Sepolia endpoint/);
     r = ok(await a('POST', '/a-api/chain/networks/base_sepolia', { rpc_urls: [sepUrl], confirmations: 3, finality: 'confirmations' }));
-    assert.equal(r.networks.base_sepolia.rpc_source, 'admin settings'); assert.ok(!JSON.stringify(r).includes(sepUrl.split('//')[1]) || true);
+    assert.match(r.networks.base_sepolia.rpc_source, /^admin settings/); assert.ok(!JSON.stringify(r).includes(sepUrl.split('//')[1]) || true);
     process.env.BASE_SEPOLIA_RPC_URLS = sepUrl;
     assert.equal((await a('POST', '/a-api/chain/networks/base', { usdc: SEPOLIA_USDC })).status, 400);
     assert.equal((await a('POST', '/a-api/chain/networks/base', { confirmations: 1 })).status, 400, 'mainnet minimum confirmations');
@@ -435,10 +435,22 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
     const owner = client(); ok(await owner('POST', '/auth/login', { email: 'owner@solvexs.test', password: nm.temporary_password }));
     assert.ok(ok(await owner('GET', '/m-api/keys')).keys.length >= 2, 'merchant sees the keys in Developers & API');
   });
+  await step('MetaMask & Blockchain: Infura first with public failover, keys masked; diagnostics; SDK self-hosted', async () => {
+    const C = require('../server/chain'), saved = process.env.BASE_SEPOLIA_RPC_URLS;
+    try {
+      delete process.env.BASE_SEPOLIA_RPC_URLS; process.env.INFURA_API_KEY = 'testinfurakey123';
+      const urls = C.rpcUrls('base_sepolia'); assert.equal(urls[0], 'https://base-sepolia.infura.io/v3/testinfurakey123'); assert.ok(urls.includes('https://sepolia.base.org'), 'public endpoint kept as failover');
+      assert.equal(C.wsUrl('base_sepolia'), 'wss://base-sepolia.infura.io/ws/v3/testinfurakey123');
+      const view = ok(await a('GET', '/a-api/chain')); assert.equal(view.infura.configured, true); assert.ok(!JSON.stringify(view).includes('testinfurakey123'), 'Infura key never returned');
+      assert.equal(view.sdk.present, true); assert.equal(view.sdk.version, '2.1.1');
+      const pub2 = ok(await pub('GET', `/c-api/sessions/${(await dh.checkout.create({ amount: 700, currency: 'USD' })).id}`)); assert.ok(!JSON.stringify(pub2).includes('testinfurakey123'), 'server Infura key never reaches the checkout');
+    } finally { delete process.env.INFURA_API_KEY; process.env.BASE_SEPOLIA_RPC_URLS = saved; }
+    const g = ok(await a('GET', '/a-api/diagnostics')); assert.ok(g.api_24h.calls > 0); assert.ok(g.server.db_latency_ms >= 0); assert.ok(g.rpc.base_sepolia.endpoints.length >= 1); assert.ok('approved' in g.wallets);
+  });
   await step('Ledger: every reconciliation check passes (incl. on-chain receipts, fees, no double credit)', async () => { const l = ok(await a('GET', '/a-api/ledger')); for (const c of l.checks) assert.ok(c.ok, c.name + ' — ' + c.detail); assert.ok(l.trial_balance.every(t => t.debits === t.credits)); });
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
   await step('Diagnostics: /api/health reports setup without leaking secrets', async () => { const h = ok(await pub('GET', '/api/health')); assert.equal(h.ok, true); assert.equal(h.database.schema_version, null === h.database.schema_version ? null : h.database.schema_version); assert.ok(h.database.users >= 1); const s = JSON.stringify(h); assert.ok(!s.includes(secret) && !s.includes('AdminPass12345')); });
-  await step('Security headers: CSP allows MetaMask Connect only from pinned hosts', async () => { const r = await fetch(BASE + '/app'); const csp = r.headers.get('content-security-policy'); assert.match(csp, /cdn\.jsdelivr\.net/); assert.match(csp, /frame-ancestors 'none'/); });
+  await step('Security headers: CSP allows MetaMask Connect only from pinned hosts', async () => { const r = await fetch(BASE + '/app'); const csp = r.headers.get('content-security-policy'); assert.doesNotMatch(csp, /cdn\.jsdelivr\.net/, 'MetaMask Connect is self-hosted'); assert.match(csp, /wss:\/\/\*\.metamask\.io/); const sdk = await fetch(BASE + '/vendor/mm-connect/connect-evm.js'); assert.equal(sdk.status, 200); assert.match(await sdk.text(), /createEVMClient/); assert.match(csp, /frame-ancestors 'none'/); });
   await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['usdc', 'card']")); });
 
   console.log(`\n${passed} checks passed${failed ? `, ${failed} FAILED` : ''}.`);

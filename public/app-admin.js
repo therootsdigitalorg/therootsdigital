@@ -5,7 +5,7 @@ NAV.admin = [
   ['Money', [['a-wallet', 'Digital Wallet'], ['a-settlements', 'Settlements'], ['a-refunds', 'Refunds'], ['a-ledger', 'Ledger & reconciliation']]],
   ['Integrations', [['a-woo', 'WooCommerce Integrations'], ['a-apilogs', 'API Logs'], ['a-webhooks', 'Webhook deliveries']]],
   ['Governance', [['a-risk', 'Risk & Security'], ['a-approvals', 'Approvals'], ['a-audit', 'Audit Trails'], ['a-staff', 'Staff & roles']]],
-  ['Configuration', [['a-settings', 'Settings → MetaMask']]],
+  ['Configuration', [['a-settings', 'MetaMask & Blockchain']]],
 ];
 const mfaWarn = () => App.me.config.requireStaffMfa && !App.me.user.mfa_enabled ? note('danger', '2FA required', 'Enroll two-factor authentication before privileged actions. <a href="#/account">Set up 2FA →</a>') : (!App.me.user.mfa_enabled ? note('warn', '2FA recommended', 'Your account has no 2FA. Production deployments enforce it for all staff. <a href="#/account">Set up 2FA →</a>') : '');
 const modeLabel = () => App.mode === 'test' ? 'Base Sepolia (test)' : 'Base mainnet (live)';
@@ -297,6 +297,13 @@ VIEWS['a-settings'] = async () => {
     body = `<div class="grid g3"><div class="card kpi"><div class="label">Platform mode</div><div class="value">${d.platform_mode === 'live' ? badge('live', 'LIVE · Base mainnet') : badge('sandbox', 'Sandbox · Base Sepolia')}</div><div class="sub">LIVE_PAYMENTS env: ${d.live_payments_env ? 'on' : 'off'}</div></div>
         <div class="card kpi"><div class="label">Payment methods</div><div class="value">MetaMask · USDC${d.providers.card ? ' + Card' : ''}</div><div class="sub"><label class="check"><input type="checkbox" data-change="cardToggle" ${d.providers.card ? 'checked' : ''} ${ok}> Card payments (sandbox test cards)</label>Live cards need a connected acquirer. Binance Pay / Coinbase stay off.</div></div>
         <div class="card kpi"><div class="label">Fee treasury wallet</div><div class="value" style="font-size:1rem">${d.fee_wallet ? mono(d.fee_wallet, 10, 8) : '—'}</div><div class="sub"><a href="#" data-act="editFeeWallet">${d.fee_wallet ? 'Change' : 'Set'}</a></div></div></div>`
+      + `<div class="grid g2"><div class="card stack"><div class="card-head" style="margin:0"><h2>MetaMask Connect</h2>${badge(d.sdk.present ? 'active' : 'fail', d.sdk.present ? 'self-hosted' : 'bundle missing')}</div>
+          ${kv([['SDK', `<span class="mono">${esc(d.sdk.package)}@${esc(d.sdk.version)}</span>`], ['Served from', `<span class="mono">${esc(d.sdk.path)}</span> · ${Math.round(d.sdk.bytes / 1024)} KB`], ['Handles', 'MetaMask extension, MetaMask Mobile (QR / deeplink), in-app browser'], ['Fallback', 'Extension EIP-6963 provider if the SDK cannot start'], ['Browser read RPC', esc(d.sdk.browser_rpc)]])}
+          <div class="row"><button class="btn sm" data-act="testMetaMask">Test MetaMask connection</button></div><div id="mmTestOut" class="faint" style="font-size:.82rem"></div></div>
+        <div class="card stack"><div class="card-head" style="margin:0"><h2>Infura</h2>${badge(d.infura.configured ? 'active' : 'pending', d.infura.configured ? 'configured' : 'not configured')}</div>
+          ${d.infura.configured ? kv(Object.entries(d.infura.networks).map(([k, x]) => [k === 'base' ? 'Base mainnet' : 'Base Sepolia', `<span class="mono" style="font-size:.75rem">${esc(x.http)}<br>${esc(x.ws)}</span>`]).concat([['API key secret', d.infura.secret ? 'set (Basic auth)' : 'not set']]))
+            : '<p class="muted">Set <span class="mono">INFURA_API_KEY</span> (and <span class="mono">INFURA_API_SECRET</span> if your key requires it) in the Vercel environment and redeploy. Infura is then used first for Base Sepolia and Base mainnet, with the public endpoint as failover. Keys stay on the server.</p>'}
+          <p class="faint">Get a key at developer.metamask.io → API keys → enable Base Sepolia and Base Mainnet.</p></div></div>`
       + Object.entries(d.networks).map(([k, n]) => networkCard(k, n, ok)).join('')
       + `<div class="card stack"><div class="card-head" style="margin:0"><h2>Base mainnet — production readiness</h2><div class="row"><button class="btn" data-act="prodChecks">Run production checks</button>${d.platform_mode === 'live' ? `<button class="btn danger" data-act="setMode" data-mode="sandbox" ${ok}>Return to sandbox</button>` : `<button class="btn primary" data-act="setMode" data-mode="live" ${ok}>Enable Base mainnet</button>`}</div></div>
         <div id="prodOut"><p class="muted">Runs live probes against the Base mainnet RPC endpoints and the USDC contract, and checks environment, database and security settings. Base mainnet can only be enabled when every required check passes.</p></div></div>
@@ -308,8 +315,19 @@ VIEWS['a-settings'] = async () => {
       ${field('Default Digital Hub fee on USDC %', input('cryptoPlatPct', { type: 'number', value: s.defaults.cryptoPlatPct, extra: 'step="0.01"' }), 'Applies to merchants created after the change.')}${field('High-value alert above (USD)', input('highValue', { type: 'number', value: s.risk.highValueUSD / 100 }))}</div><div class="err" id="formErr"></div></form>
       <div class="card">${kv([['Public URL (MetaMask signatures are bound to this domain)', `<span class="mono">${esc(d.config.publicUrl)}</span>`], ['Live payments env', d.config.livePayments ? badge('active', 'on') : badge('pending', 'off')], ['Staff 2FA enforced', d.config.requireStaffMfa ? 'yes' : 'no (development)']])}</div>`;
   }
-  return head('Super admin', 'Settings', 'MetaMask USDC gateway configuration: Base networks, RPC providers, the verified USDC contracts, confirmations and finality, sandbox / live mode.') + mfaWarn()
-    + tabs('set', [['metamask', 'MetaMask'], ['platform', 'Platform rules']], 'metamask') + body;
+  if (t === 'diagnostics') {
+    const g = await api('GET', '/a-api/diagnostics'), a = g.api_24h, w = g.webhooks_24h;
+    const kpi = (l, v, s, bad) => `<div class="card kpi"><div class="label">${l}</div><div class="value">${bad ? badge('fail', v) : v}</div><div class="sub">${s}</div></div>`;
+    body = `<div class="row" style="justify-content:flex-end"><button class="btn" data-act="refreshDiag">Run diagnostics again</button></div>
+      <div class="grid g4">${kpi('Database', g.server.db_latency_ms + ' ms', `${g.server.db} · one query`, g.server.db_latency_ms > 300)}${kpi('API · 24 h', a.calls + ' calls', `${a.errors} errors (${a.error_rate}%) · p50 ${a.p50_ms} ms · p95 ${a.p95_ms} ms`, a.error_rate > 20)}
+        ${kpi('Webhooks · 24 h', w.delivered + ' delivered', `${w.pending} pending · ${w.retrying} retrying · ${w.failed} failed`, w.failed > 0)}${kpi('Server', esc(g.server.node), `${g.server.serverless ? 'Vercel' + (g.server.region ? ' · ' + esc(g.server.region) : '') : 'long-running'} · up ${g.server.uptime_s}s`)}</div>
+      <div class="grid g2"><div class="card"><h2>Blockchain RPC & monitor</h2><div style="margin-top:10px">${Object.entries(g.rpc).map(([k, r]) => `<h3>${k === 'base' ? 'Base mainnet' : 'Base Sepolia'}</h3>${kv([['Source', esc(r.source)], ['Endpoints', r.endpoints.map(e => `<span class="mono" style="font-size:.75rem">${esc(e.url)}</span> ${e.ok == null ? '<span class="faint">untested</span>' : badge(e.ok ? 'pass' : 'fail', e.ok ? (e.ms != null ? e.ms + ' ms' : 'ok') : 'down')}`).join('<br>')], ['WebSocket', esc(r.ws.status)], ['Monitor', r.monitor ? (r.monitor.ok === false ? badge('fail', r.monitor.error) : r.monitor.head ? `head #${r.monitor.head} · ${fmtDT(r.monitor.at)}` : 'idle · ' + fmtDT(r.monitor.at)) : 'not run yet']])}`).join('')}</div></div>
+        <div class="card"><h2>Payments, wallets & errors</h2><div style="margin-top:10px">${kv([['Payments 24 h (' + App.mode + ')', Object.entries(g.payments_24h).map(([s, n]) => `${badge(s)} ${n}`).join(' ') || 'none'], ['Merchant wallets', `${g.wallets.approved} approved · ${g.wallets.signature_verified} signed (awaiting review) · ${g.wallets.awaiting_signature} awaiting signature`],
+          ['Infura', g.infura.configured ? badge('active', 'INFURA_API_KEY set') + (g.infura.secret ? ' + secret' : '') : '<span class="faint">not configured</span>'], ['Top API errors', a.top_errors.map(([c, n]) => `<span class="mono">${esc(c)}</span> × ${n}`).join('<br>') || 'none'],
+          ['Recent RPC errors', g.rpc_errors.map(e => `${esc(e.network)} · <span class="mono">${esc(e.method)}</span>: ${esc(e.error)}`).join('<br>') || 'none']])}</div></div></div>`;
+  }
+  return head('Super admin', 'MetaMask & Blockchain', 'MetaMask Connect, Infura and Base RPC providers, Base Sepolia (test) and Base mainnet (live), the verified USDC contracts, confirmations and finality, connection tests and API diagnostics.') + mfaWarn()
+    + tabs('set', [['metamask', 'MetaMask & Blockchain'], ['diagnostics', 'API diagnostics'], ['platform', 'Platform rules']], 'metamask') + body;
 };
 function networkCard(k, n, ok) {
   const mon = n.monitor, tok = n.token;
@@ -340,6 +358,16 @@ ACT.prodChecks = () => run(async () => {
   $('#prodOut').innerHTML = `${r.ready ? note('info', 'Ready', 'All required checks pass.') : note('warn', 'Not ready', 'Fix the failing required checks before enabling Base mainnet.')}<div class="stack" style="margin-top:10px">${r.checks.map(c => `<div class="check-row"><div><b>${esc(c.label)}</b>${c.required ? '' : ' <span class="tag">recommended</span>'}<div class="muted" style="font-size:.82rem;overflow-wrap:anywhere">${esc(c.detail || '')}</div></div>${badge(c.ok ? 'pass' : c.required ? 'fail' : 'attention', c.ok ? 'pass' : c.required ? 'fail' : 'warn')}</div>`).join('<div class="divider"></div>')}</div>`;
 }, { noRefresh: true });
 ACT.setMode = d => confirmBox(d.mode === 'live' ? 'Enable Base mainnet?' : 'Return to sandbox?', d.mode === 'live' ? 'Live-enabled merchants will receive real USDC on Base mainnet into their approved wallets. Production checks run again before the switch.' : 'Base mainnet checkout stops immediately for every merchant. In-flight payments keep being verified.', 'Confirm', () => api('POST', '/a-api/chain/mode', { mode: d.mode }), d.mode !== 'live');
+ACT.refreshDiag = () => render();
+/** Real wallet test from the admin's browser: connect through MetaMask Connect, read chain and a balance. Nothing is signed or sent. */
+ACT.testMetaMask = () => run(async () => {
+  const out = $('#mmTestOut'), chain = (await api('GET', '/m-api/wallets').catch(() => null))?.chain || { chainIdHex: App.mode === 'test' ? '0x14a34' : '0x2105', chainName: App.mode === 'test' ? 'Base Sepolia' : 'Base', rpcUrls: [App.mode === 'test' ? 'https://sepolia.base.org' : 'https://mainnet.base.org'], nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, blockExplorerUrls: [] };
+  out.textContent = 'Opening MetaMask…';
+  try {
+    const w = await DHMetaMask.connect(chain), cid = await DHMetaMask.chainId(w.provider), bal = await DHMetaMask.nativeBalance(w.provider, w.account).catch(() => null);
+    out.innerHTML = `Connected via <b>${esc(w.via)}</b> · account <span class="mono">${esc(short(w.account, 8, 6))}</span> · chain ${esc(cid)}${cid === chain.chainIdHex ? '' : ' (not ' + esc(chain.chainName) + ' — checkout will ask to switch)'}${bal != null ? ` · ${(Number(bal) / 1e18).toFixed(5)} ETH` : ''}${DHMetaMask.sdkError ? ` · SDK fallback: ${esc(DHMetaMask.sdkError.message)}` : ''}`;
+  } catch (e) { out.textContent = 'MetaMask: ' + mmErr(e); throw new Error(mmErr(e)); }
+}, { noRefresh: true });
 ACT.cardToggle = (d, el) => run(() => api('PATCH', '/a-api/chain', { card_sandbox: el.checked }), { ok: el.checked ? 'Card payments enabled (sandbox test cards)' : 'Card payments disabled' });
 ACT.editFeeWallet = () => formModal('Fee treasury wallet', 'feeWallet', note('info', '', 'Merchants pay Digital Hub fee statements in USDC to this address. Use a wallet Digital Hub controls (hardware wallet / multisig recommended).') + field('Address', input('fee_wallet', { ph: '0x…', extra: 'spellcheck="false"' })), 'Save');
 FORM.feeWallet = async f => { await api('PATCH', '/a-api/chain', f); closeModal(); toast('Fee wallet saved'); render(); };

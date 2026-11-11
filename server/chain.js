@@ -14,11 +14,11 @@ const NETWORKS = {
   base_sepolia: { key: 'base_sepolia', mode: 'test', chainId: 84532, name: 'Base Sepolia', testnet: true,
     usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', usdcPinned: false, explorer: 'https://sepolia.basescan.org',
     publicRpc: ['https://sepolia.base.org'], minConfirmations: 1, defaults: { confirmations: 3, finality: 'confirmations', quoteMinutes: 30 },
-    envRpc: 'BASE_SEPOLIA_RPC_URLS', envWs: 'BASE_SEPOLIA_WS_URL', faucet: 'https://faucet.circle.com' },
+    envRpc: 'BASE_SEPOLIA_RPC_URLS', envWs: 'BASE_SEPOLIA_WS_URL', faucet: 'https://faucet.circle.com', infura: 'base-sepolia' },
   base: { key: 'base', mode: 'live', chainId: 8453, name: 'Base', testnet: false,
     usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', usdcPinned: true, explorer: 'https://basescan.org',
     publicRpc: ['https://mainnet.base.org'], minConfirmations: 5, defaults: { confirmations: 10, finality: 'safe', quoteMinutes: 30 },
-    envRpc: 'BASE_RPC_URLS', envWs: 'BASE_WS_URL' },
+    envRpc: 'BASE_RPC_URLS', envWs: 'BASE_WS_URL', infura: 'base-mainnet' },
 };
 const FINALITY = ['confirmations', 'safe', 'finalized'];
 const networkFor = mode => mode === 'live' ? 'base' : 'base_sepolia';
@@ -50,14 +50,23 @@ const saveSettings = s => { store.setMeta('chain', s); cached = null; };
 const net = key => { const n = NETWORKS[key]; if (!n) throw new U.HttpError(400, 'network_invalid', 'Unknown network.'); return { ...n, ...settings().networks[key], usdc: settings().networks[key].usdc }; };
 
 const unseal = v => { try { return U.unseal(v); } catch { return null; } };
+/* Infura (MetaMask's node service): set INFURA_API_KEY (and optionally INFURA_API_SECRET if "Require API key secret"
+   is on) in the server environment. Keys never leave the server; the browser uses public endpoints only. */
+const infuraKey = () => String(process.env.INFURA_API_KEY || '').trim();
+const infuraSecret = () => String(process.env.INFURA_API_SECRET || '').trim();
+const infuraHttp = key => infuraKey() ? `https://${NETWORKS[key].infura}.infura.io/v3/${infuraKey()}` : null;
+const infuraWs = key => infuraKey() ? `wss://${NETWORKS[key].infura}.infura.io/ws/v3/${infuraKey()}` : null;
+const isInfura = url => /\.infura\.io\//.test(url);
+/** Endpoint order (failover): explicit env list (exclusive) → Infura → admin-configured → public Base endpoint. */
 function rpcUrls(key) {
   const env = envList(NETWORKS[key].envRpc);
   if (env.length) return env;
   const admin = (settings().networks[key].rpcUrls || []).map(unseal).filter(Boolean);
-  return admin.length ? admin : NETWORKS[key].publicRpc;
+  return [...new Set([infuraHttp(key), ...admin, ...NETWORKS[key].publicRpc].filter(Boolean))];
 }
-function wsUrl(key) { return process.env[NETWORKS[key].envWs] || unseal(settings().networks[key].wsUrl || '') || ''; }
-const rpcSource = key => envList(NETWORKS[key].envRpc).length ? 'environment' : (settings().networks[key].rpcUrls || []).length ? 'admin settings' : 'public Base endpoint';
+function wsUrl(key) { return process.env[NETWORKS[key].envWs] || infuraWs(key) || unseal(settings().networks[key].wsUrl || '') || ''; }
+const rpcSource = key => envList(NETWORKS[key].envRpc).length ? 'environment (' + NETWORKS[key].envRpc + ')' : [infuraKey() && 'Infura (INFURA_API_KEY)', (settings().networks[key].rpcUrls || []).length && 'admin settings', 'public Base endpoint (fallback)'].filter(Boolean).join(' → ');
+function infuraStatus() { return { configured: !!infuraKey(), secret: !!infuraSecret(), networks: Object.fromEntries(Object.keys(NETWORKS).map(k => [k, infuraKey() ? { http: mask(infuraHttp(k)), ws: mask(infuraWs(k)) } : null])) }; }
 /** Hide keys/paths: https://base-sepolia.g.alchemy.com/v2/abc123 → https://base-sepolia.g.alchemy.com/… */
 function mask(url) { try { const u = new URL(url); return `${u.protocol}//${u.host}${u.pathname.length > 1 || u.search ? '/…' : ''}`; } catch { return 'invalid URL'; } }
 
@@ -65,7 +74,9 @@ function mask(url) { try { const u = new URL(url); return `${u.protocol}//${u.ho
 function walletParams(key) {
   const n = net(key);
   return { key: n.key, chainId: n.chainId, chainIdHex: '0x' + n.chainId.toString(16), chainName: n.name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpcUrls: n.publicRpc, blockExplorerUrls: [n.explorer], usdc: n.usdc, usdcDecimals: E.USDC_DECIMALS, testnet: n.testnet, faucet: n.faucet || null };
+    rpcUrls: n.publicRpc, blockExplorerUrls: [n.explorer], usdc: n.usdc, usdcDecimals: E.USDC_DECIMALS, testnet: n.testnet, faucet: n.faucet || null,
+    // read RPC for the MetaMask Connect SDK: an origin-restricted Infura key meant for browsers (never INFURA_API_KEY), else public
+    sdkRpcUrl: process.env.INFURA_BROWSER_KEY ? `https://${n.infura}.infura.io/v3/${String(process.env.INFURA_BROWSER_KEY).trim()}` : n.publicRpc[0] };
 }
 const explorerTx = (key, h) => `${NETWORKS[key].explorer}/tx/${h}`;
 const explorerAddr = (key, a) => `${NETWORKS[key].explorer}/address/${a}`;
@@ -77,7 +88,9 @@ let rpcSeq = 1;
 async function rpcAt(url, method, params, timeoutMs = 10000) {
   const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), timeoutMs), t0 = Date.now();
   try {
-    const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: rpcSeq++, method, params }), signal: ctrl.signal });
+    const headers = { 'content-type': 'application/json' };
+    if (isInfura(url) && infuraSecret()) headers.authorization = 'Basic ' + Buffer.from(':' + infuraSecret()).toString('base64'); // Infura "API key secret"
+    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: rpcSeq++, method, params }), signal: ctrl.signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     if (j.error) { const e = new Error(j.error.message || 'RPC error'); e.rpcCode = j.error.code; e.fatal = true; throw e; }
@@ -196,7 +209,7 @@ async function productionChecks({ live = true } = {}) {
   add('postgres', 'PostgreSQL database', store.usePg, store.usePg ? 'Using PostgreSQL.' : 'Local SQLite is for development only.');
   add('confirmations', `Base confirmations ≥ ${NETWORKS.base.minConfirmations}`, n.confirmations >= NETWORKS.base.minConfirmations, `Configured: ${n.confirmations} confirmations, finality "${n.finality}".`);
   add('usdc_pinned', 'Base USDC contract is Circle\'s canonical USDC', E.lower(n.usdc) === E.lower(NETWORKS.base.usdc), NETWORKS.base.usdc);
-  const custom = envList(NETWORKS.base.envRpc).length || (s.networks.base.rpcUrls || []).length;
+  const custom = envList(NETWORKS.base.envRpc).length || (s.networks.base.rpcUrls || []).length || !!infuraKey();
   add('dedicated_rpc', 'Dedicated Base RPC provider configured', custom, custom ? `${rpcUrls('base').length} endpoint(s) from ${rpcSource('base')}.` : 'The public endpoint is rate-limited and has no SLA — add Alchemy / QuickNode / Infura / Coinbase CDP URLs.');
   add('rpc_redundancy', 'Two or more Base RPC providers (failover)', rpcUrls('base').length >= 2, `${rpcUrls('base').length} configured.`, false);
   add('ws', 'WebSocket endpoint for live block monitoring', !!wsUrl('base'), wsUrl('base') ? 'Configured.' : 'Optional: HTTP polling works, WebSocket lowers detection latency.', false);
@@ -210,5 +223,5 @@ async function productionChecks({ live = true } = {}) {
   return { checks, ready: checks.filter(c => c.required).every(c => c.ok) };
 }
 
-module.exports = { NETWORKS, FINALITY, networkFor, settings, saveSettings, net, rpcUrls, wsUrl, rpcSource, mask, walletParams, explorerTx, explorerAddr,
+module.exports = { infuraStatus, NETWORKS, FINALITY, networkFor, settings, saveSettings, net, rpcUrls, wsUrl, rpcSource, mask, walletParams, explorerTx, explorerAddr,
   rpc, blockNumber, getReceipt, getTx, getLogs, getLogsRange, finalHead, verifyToken, probe, healthView, rpcErrors, subscribeHeads, stopSockets, socketView, productionChecks };

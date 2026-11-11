@@ -14,7 +14,8 @@
     "test": "node test/smoke.js",
     "test:ui": "node test/ui.js",
     "test:sepolia": "node test/live-sepolia.js",
-    "test:all": "node test/smoke.js && node test/ui.js && node test/live-sepolia.js"
+    "test:all": "node test/smoke.js && node test/ui.js && node test/live-sepolia.js",
+    "build:mm": "node build/mm-connect.mjs"
   },
   "license": "UNLICENSED",
   "dependencies": {
@@ -24,5 +25,9 @@
     "@supabase/supabase-js": "^2.119.0",
     "@vercel/functions": "^3.10.6",
     "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@metamask/connect-evm": "^2.1.1",
+    "esbuild": "^0.25.12"
   }
 }

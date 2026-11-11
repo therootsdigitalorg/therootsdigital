@@ -132,6 +132,23 @@ on-chain transfer), `payment_links`, `events`, `webhook_endpoints`, `account`. K
 `crypto.payment.underpaid` · `crypto.payment.expired` · `refund.created` / `refund.succeeded` · `payment.refunded`.
 Webhooks carry `DigitalHub-Signature: t=<unix>,v1=<HMAC-SHA256(secret, t + "." + body)>` and retry with backoff.
 
+## MetaMask Connect & Infura
+
+- **Customer wallet connections** use the official **MetaMask Connect SDK** (`@metamask/connect-evm@2.1.1`), self-hosted at
+  `/vendor/mm-connect/connect-evm.js`. It covers the MetaMask extension, MetaMask Mobile (QR code / deeplink) and the
+  in-app browser. Rebuild it with `npm run build:mm`; the output is committed, so deployments need no build step. If
+  the SDK can't start within 4 s, checkout falls back to the extension's EIP-6963 provider, so it's still MetaMask only.
+  - **Why self-hosted:** jsDelivr's automatic ESM bundling breaks the SDK (its QR modal and mobile relay).
+  - **What the build fixes:** two CommonJS/ESM interop issues and a missing `Buffer` (see `build/mm-connect.mjs`).
+- **Infura:** set `INFURA_API_KEY` (plus `INFURA_API_SECRET` if required) in Vercel.
+  - **Order of use:** Infura is used first for Base Sepolia and Base mainnet RPC and WebSocket, then admin-configured endpoints, then the public Base endpoint as failover.
+  - **Key handling:** keys stay server-side and are masked in the UI.
+  - **Browser key:** `INFURA_BROWSER_KEY` is an optional, separate, domain-restricted key for the SDK's read calls in browsers.
+- **Super Admin → MetaMask & Blockchain:** Infura and SDK status, a *Test MetaMask connection* button (connects from
+  your browser and reads chain and balance; nothing is signed or sent), per-network RPC/token tests, confirmations and
+  finality, sandbox/live switch with production checks, and an **API diagnostics** tab.
+  - **What diagnostics show:** database latency, 24-hour API calls/errors/latency, webhook delivery health, monitor and RPC status, merchant wallet verification counts, and recent RPC errors.
+
 ## Sandbox cards
 
 Super Admin → Settings → MetaMask → **Card payments (sandbox test cards)** adds a **Card** tab to checkout next to

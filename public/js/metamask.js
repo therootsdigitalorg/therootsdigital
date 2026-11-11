@@ -1,13 +1,15 @@
 /* Digital Hub · MetaMask client (checkout + dashboard).
-   MetaMask only: the extension is discovered through EIP-6963 (rdns io.metamask). When it is not installed,
-   MetaMask Connect (@metamask/connect-evm, pinned) is loaded on demand for MetaMask Mobile (QR / deeplink).
+   Connections go through the official MetaMask Connect SDK (@metamask/connect-evm 2.1.1, self-hosted at
+   /vendor/mm-connect/connect-evm.js — built by `npm run build:mm`): it handles the MetaMask extension, MetaMask Mobile
+   (QR code / deeplink) and the MetaMask in-app browser. If the SDK cannot start (blocked script, old browser, extension
+   channel unavailable), we fall back to the MetaMask extension's own EIP-6963 provider (rdns io.metamask) — still MetaMask only.
    This file never asks for, sees or stores private keys or seed phrases: MetaMask signs everything itself.
    The server re-verifies every signature and every transaction on-chain; nothing here can mark a payment paid. */
 'use strict';
 window.DHMetaMask = (function () {
-  var CONNECT_URL = 'https://cdn.jsdelivr.net/npm/@metamask/connect-evm@2.1.0/+esm';
+  var SDK_URL = '/vendor/mm-connect/connect-evm.js', SDK_VERSION = '2.1.1', SDK_START_MS = 4000;
   var METAMASK_RDNS = ['io.metamask', 'io.metamask.flask', 'io.metamask.mobile'];
-  var found = {}, client = null, active = null;
+  var found = {}, client = null, clientKey = '', active = null, sdkError = null;
 
   window.addEventListener('eip6963:announceProvider', function (e) { if (e.detail && e.detail.info) found[e.detail.info.rdns] = e.detail; });
   function request() { window.dispatchEvent(new Event('eip6963:requestProvider')); }
@@ -36,33 +38,46 @@ window.DHMetaMask = (function () {
   var isMobile = function () { return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent); };
   function deepLink() { return 'https://metamask.app.link/dapp/' + location.host + location.pathname + location.search + location.hash; }
 
-  async function loadConnect(chain) {
-    if (client) return client;
-    var mod;
-    try { mod = await import(CONNECT_URL); }
-    catch (e) { var err = new Error('MetaMask Connect could not be loaded. Install the MetaMask extension, or open this page in the MetaMask mobile app.'); err.code = 'connect_unavailable'; throw err; }
-    var nets = {}; nets[chain.chainIdHex] = chain.rpcUrls[0];
-    client = await mod.createEVMClient({ dapp: { name: 'Digital Hub', url: location.origin }, api: { supportedNetworks: nets } });
-    return client;
+  function timeout(promise, ms, msg) { return Promise.race([promise, new Promise(function (_, rej) { setTimeout(function () { rej(Object.assign(new Error(msg), { code: 'sdk_timeout' })); }, ms); })]); }
+  /** Start the official SDK once per chain configuration. */
+  async function sdk(chain) {
+    var key = chain.chainIdHex + '|' + (chain.sdkRpcUrl || chain.rpcUrls[0]);
+    if (client && clientKey === key) return client;
+    var mod = await import(SDK_URL);
+    var nets = {}; nets[chain.chainIdHex] = chain.sdkRpcUrl || chain.rpcUrls[0];
+    client = await timeout(mod.createEVMClient({ dapp: { name: 'Digital Hub', url: location.origin, iconUrl: location.origin + '/favicon.ico' }, api: { supportedNetworks: nets } }), SDK_START_MS, 'MetaMask Connect did not start in time.');
+    clientKey = key; return client;
   }
+  var rejected = function (e) { var code = e && (e.code || (e.data && e.data.originalError && e.data.originalError.code)); return code === 4001 || code === 'ACTION_REJECTED' || /reject|denied|cancel/i.test(e && e.message || ''); };
 
-  /** Connect MetaMask → { provider, account, via }. Prompts the user. */
+  /** Connect MetaMask → { provider, account, via }. Prompts the user.
+      1) official MetaMask Connect SDK (extension, mobile QR/deeplink, in-app browser)
+      2) fallback: the extension's EIP-6963 provider, if the SDK could not start */
   async function connect(chain, opts) {
     opts = opts || {};
-    var d = opts.forceConnect ? null : await detect();
+    if (!opts.direct) {
+      try {
+        var c = await sdk(chain);
+        var r = await c.connect({ chainIds: [chain.chainIdHex] });
+        var p = c.getProvider();
+        var acct = (r && r.accounts && r.accounts[0]) || (await p.request({ method: 'eth_accounts' }))[0];
+        if (!acct) throw new Error('MetaMask returned no account.');
+        active = { provider: p, account: acct, via: 'metamask-connect' }; sdkError = null;
+        return active;
+      } catch (e) {
+        if (rejected(e)) throw e; // the customer said no — do not silently try another path
+        sdkError = e; if (window.console) console.warn('[MetaMask Connect] falling back to the extension provider:', e && e.message);
+      }
+    }
+    var d = await detect();
     if (d) {
       var accounts = await d.provider.request({ method: 'eth_requestAccounts' });
       if (!accounts || !accounts.length) throw new Error('MetaMask returned no account.');
       active = { provider: d.provider, account: accounts[0], via: d.via };
       return active;
     }
-    var c = await loadConnect(chain);
-    var r = await c.connect({ chainIds: [chain.chainIdHex] });
-    var p = c.getProvider();
-    var acct = (r && r.accounts && r.accounts[0]) || (await p.request({ method: 'eth_accounts' }))[0];
-    if (!acct) throw new Error('MetaMask returned no account.');
-    active = { provider: p, account: acct, via: 'metamask-connect' };
-    return active;
+    var err = new Error('MetaMask could not be reached. Install the MetaMask extension, or open this page in the MetaMask mobile app.' + (sdkError ? ' (' + sdkError.message + ')' : ''));
+    err.code = 'metamask_unavailable'; throw err;
   }
   /** Silent reconnect (no prompt) if MetaMask already authorised this site. */
   async function reconnect() {
@@ -112,5 +127,6 @@ window.DHMetaMask = (function () {
   }
   function on(event, fn) { var p = active && active.provider; if (p && p.on) p.on(event, fn); }
   return { detect: detect, connect: connect, reconnect: reconnect, ensureChain: ensureChain, chainId: chainId, sign: sign, sendTransfer: sendTransfer, tokenBalance: tokenBalance,
-    nativeBalance: nativeBalance, formatUnits: formatUnits, same: same, message: message, on: on, isMobile: isMobile, deepLink: deepLink, get active() { return active; } };
+    nativeBalance: nativeBalance, formatUnits: formatUnits, same: same, message: message, on: on, isMobile: isMobile, deepLink: deepLink, sdkVersion: SDK_VERSION,
+    get active() { return active; }, get sdkError() { return sdkError; } };
 })();

@@ -28,7 +28,7 @@ async function call(method, path, body) {
 
 async function load() {
   try { st.s = await call('GET', ''); }
-  catch (e) { $('#co').innerHTML = `<div class="co-body"><div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">!</div><h2>Checkout unavailable</h2><p class="muted">${esc(e.message)}</p><button class="btn" type="button" onclick="location.reload()">Try again</button></div></div>`; return; }
+  catch (e) { $('#co').innerHTML = `<div class="co-body"><div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">!</div><h2>Checkout unavailable</h2><p class="muted">${esc(e.message)}</p><button class="btn" type="button" id="reloadCo">Try again</button></div></div>`; $('#reloadCo').onclick = () => location.reload(); return; } // no inline handlers: the CSP blocks them
   const s = st.s;
   if (s.customer_email && !st.email) st.email = s.customer_email;
   $('#banner').innerHTML = s.mode === 'test' ? '<div class="test-banner">Test mode · Base Sepolia testnet · test USDC has no value</div>' : '';
@@ -104,7 +104,7 @@ function connectView() {
     if (st.detected) h += busyBtn('connect', '<span class="mm-mark"></span> Connect MetaMask');
     else h += `<div class="note info"><span>MetaMask was not found in this browser.</span></div>
       ${MM.isMobile() ? `<a class="btn primary mm-btn" href="${esc(MM.deepLink())}"><span class="mm-mark"></span> Open in MetaMask app</a>` : `<a class="btn primary mm-btn" href="https://metamask.io/download/" target="_blank" rel="noopener"><span class="mm-mark"></span> Install MetaMask</a>`}
-      ${busyBtn('connectMobile', 'Connect MetaMask Mobile (QR)', '')}`;
+      ${busyBtn('connectMobile', 'Connect with MetaMask Mobile (QR code)', '')}<p class="faint" style="font-size:.75rem">Uses the official MetaMask Connect: scan the QR code with the MetaMask app.</p>`;
   } else {
     h += `<div class="acct"><div><div class="faint" style="font-size:.72rem;font-weight:700">PAYING FROM</div><span class="mono">${esc(short(w.account, 8, 6))}</span></div><button class="btn sm ghost" data-act="disconnect">Change</button></div>`;
     if (!st.chainOk) h += steps(1) + busyBtn('switch', `Switch MetaMask to ${esc(c.chainName)}`);
