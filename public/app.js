@@ -211,13 +211,27 @@ ACT.setupMfa = () => run(async () => {
     <form class="stack" data-form="mfaEnable" id="mf">${field('Code', input('code', { req: true, extra: 'inputmode="numeric" maxlength="6" autocomplete="one-time-code"' }))}<div class="err" id="formErr"></div></form>`,
     foot: `<button class="btn primary" type="submit" form="mf">Verify and enable</button>`, onMount: () => qrInto($('#mfaQr'), r.otpauth) });
 }, { noRefresh: true });
+ACT.toggleMfa = () => App.me.user.mfa_enabled
+  ? formModal('Turn off two-factor authentication', 'mfaDisable', note('warn', '', 'Your account will be protected by your password only.') + field('Current password', input('password', { type: 'password', req: true, extra: 'autocomplete="current-password"' })) + field('Authenticator code', input('code', { req: true, extra: 'inputmode="numeric" maxlength="6" autocomplete="one-time-code"' })), 'Turn off')
+  : ACT.setupMfa();
+FORM.mfaDisable = async f => { await api('POST', '/auth/mfa/disable', f); closeModal(); toast('Two-factor authentication turned off'); await loadMe(); };
+ACT.toggleMfaPolicy = () => { const on = !!App.me.config?.requireStaffMfa;
+  if (!on && !App.me.user.mfa_enabled) return toast('Turn on two-factor authentication for your own account first.', 'err');
+  formModal(on ? 'Make 2FA optional for admins' : 'Require 2FA for all admins', 'mfaPolicy', (on ? note('warn', '', 'Admins will be able to sign in with a password only. Live payments still need 2FA on every admin account.') : note('info', '', 'Admins without 2FA will have to set it up at their next sign-in.')) + (App.me.user.mfa_enabled ? field('Authenticator code', input('code', { req: true, extra: 'inputmode="numeric" maxlength="6" autocomplete="one-time-code"' })) : ''), on ? 'Make optional' : 'Require 2FA', { data: { to: on ? '' : '1' } }); };
+FORM.mfaPolicy = async (f, form) => { await api('POST', '/api/v1/admin/security/mfa-policy', { required: !!form.dataset.to, code: f.code }); closeModal(); toast('Saved'); await loadMe(); };
 FORM.mfaEnable = async f => { await api('POST', '/auth/mfa/enable', f); closeModal(); toast('Two-factor authentication enabled'); await loadMe(); };
 FORM.password = async (f, form) => { if (f.password !== f.confirm) throw new Error('New passwords do not match.'); await api('POST', '/auth/password', f); form.reset(); toast('Password changed. Other sessions were signed out.'); };
+const switchBtn = (on, act, label, disabled = false, title = '') => `<button class="mode-switch sw" role="switch" aria-checked="${on}" data-act="${act}" ${disabled ? 'disabled' : ''} title="${esc(title)}"><span class="knob"></span>${esc(label)}: ${on ? 'On' : 'Off'}</button>`;
 VIEWS.account = async () => {
-  const u = App.me.user;
+  const u = App.me.user, policy = !!App.me.config?.requireStaffMfa, superAdmin = isStaff() && u.role === 'super_admin';
+  const policyCard = App.single && superAdmin ? `<div class="card stack"><div class="card-head" style="margin:0"><h2>Require 2FA for all admins</h2>${badge(policy ? 'enabled' : 'pending', policy ? 'on' : 'off')}</div>
+      <p class="muted">When on, every admin must use an authenticator app to sign in. Live payments still need 2FA on every admin account (Production readiness).</p>
+      ${switchBtn(policy, 'toggleMfaPolicy', 'Require 2FA', App.me.config?.mfaPolicyEnv, App.me.config?.mfaPolicyEnv ? 'Set by REQUIRE_STAFF_MFA in the server environment' : '')}</div>` : '';
   return head('Account', 'Your security', esc(u.email))
     + `<div class="grid g2"><div class="card stack"><div class="card-head" style="margin:0"><h2>Two-factor authentication</h2>${badge(u.mfa_enabled ? 'enabled' : 'pending', u.mfa_enabled ? 'on' : 'off')}</div>
-      <p class="muted">${isStaff() ? 'Required for every privileged admin action.' : 'Required for live keys and live payouts.'}</p>${u.mfa_enabled ? '<p class="faint">To reset 2FA, ask an account owner or Digital Hub support.</p>' : '<button class="btn primary" data-act="setupMfa">Set up 2FA</button>'}</div>
+      <p class="muted">${isStaff() ? 'A 6-digit code from your authenticator app is asked at sign-in and for sensitive changes.' : 'Required for live keys and live payouts.'}</p>
+      ${switchBtn(u.mfa_enabled, 'toggleMfa', 'Two-factor', u.mfa_enabled && isStaff() && policy, u.mfa_enabled && isStaff() && policy ? 'Switch off “Require 2FA for all admins” first' : '')}
+      ${u.mfa_enabled && isStaff() && policy ? '<p class="faint">2FA is required for all admins, so it cannot be switched off here.</p>' : ''}</div>${policyCard}
      <form class="card stack" data-form="password"><h2>Change password</h2>${field('Current password', input('current', { type: 'password', req: true, extra: 'autocomplete="current-password"' }))}
       ${field('New password', input('password', { type: 'password', req: true, extra: 'autocomplete="new-password" minlength="10"' }))}${field('Confirm new password', input('confirm', { type: 'password', req: true, extra: 'autocomplete="new-password"' }))}
       <div class="err" id="formErr"></div><button class="btn primary" type="submit">Change password</button></form></div>`;

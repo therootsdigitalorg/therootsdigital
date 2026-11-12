@@ -68,14 +68,14 @@ module.exports = {
   productName: 'DIGITAL HUB — Card Payments & Crypto Settlement',
   /* Authorize.Net (official endpoints; overridable only for local tests) */
   anet: {
-    sandbox: { api: env('ANET_SANDBOX_API_URL', 'https://apitest.authorize.net/xml/v1/request.api'), hosted: env('ANET_SANDBOX_HOSTED_URL', 'https://test.authorize.net/payment/payment'), rest: env('ANET_SANDBOX_REST_URL', 'https://apitest.authorize.net/rest/v1') },
-    production: { api: env('ANET_PRODUCTION_API_URL', 'https://api.authorize.net/xml/v1/request.api'), hosted: env('ANET_PRODUCTION_HOSTED_URL', 'https://accept.authorize.net/payment/payment'), rest: env('ANET_PRODUCTION_REST_URL', 'https://api.authorize.net/rest/v1') },
+    sandbox: { api: env('ANET_SANDBOX_API_URL', 'https://apitest.authorize.net/xml/v1/request.api'), hosted: env('ANET_SANDBOX_HOSTED_URL', 'https://test.authorize.net/payment/payment'), rest: env('ANET_SANDBOX_REST_URL', 'https://apitest.authorize.net/rest/v1'), acceptJs: env('ANET_SANDBOX_ACCEPTJS_URL', 'https://jstest.authorize.net/v1/Accept.js') },
+    production: { api: env('ANET_PRODUCTION_API_URL', 'https://api.authorize.net/xml/v1/request.api'), hosted: env('ANET_PRODUCTION_HOSTED_URL', 'https://accept.authorize.net/payment/payment'), rest: env('ANET_PRODUCTION_REST_URL', 'https://api.authorize.net/rest/v1'), acceptJs: env('ANET_PRODUCTION_ACCEPTJS_URL', 'https://js.authorize.net/v1/Accept.js') },
   },
 };
 
 Object.defineProperty(module.exports, 'requireStaffMfa', { enumerable: true, get() {
   if (staffMfaEnv !== undefined && staffMfaEnv !== '') return flag('REQUIRE_STAFF_MFA', false);
-  if (!module.exports.multiMerchant) return true; // single-business platform: 2FA is mandatory for the Super Admin
+  if (!module.exports.multiMerchant) { try { return require('./core').platform().adminMfa !== false; } catch { return true; } } // single-business: on by default; Super Admin can switch it off (Your security)
   try { return !!require('./core').platform().staffMfa; } catch { return false; }
 } });
-Object.defineProperty(module.exports, 'staffMfaSource', { get: () => staffMfaEnv !== undefined && staffMfaEnv !== '' ? 'environment (REQUIRE_STAFF_MFA)' : module.exports.multiMerchant ? 'Super Admin setting' : 'mandatory (single-business platform)' });
+Object.defineProperty(module.exports, 'staffMfaSource', { get: () => staffMfaEnv !== undefined && staffMfaEnv !== '' ? 'environment (REQUIRE_STAFF_MFA)' : 'Super Admin setting' });

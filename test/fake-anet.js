@@ -45,6 +45,15 @@ function fakeAnet({ loginId, transactionKey }) {
       }
       case 'createTransactionRequest': {
         const tr = req.transactionRequest, ref = st.txs[tr.refTransId];
+        if (tr.payment?.opaqueData) { // Accept.js token charge
+          const od = tr.payment.opaqueData; st.lastOpaque = od;
+          if (od.dataDescriptor !== 'COMMON.ACCEPT.INAPP.PAYMENT') return err('E00114', 'Invalid OTS Token.');
+          const decline = /decline/.test(od.dataValue), authOnly = tr.transactionType === 'authOnlyTransaction', amt = Math.round(+tr.amount * 100);
+          const t = add({ type: tr.transactionType, status: decline ? 'declined' : authOnly ? 'authorizedPendingCapture' : 'capturedPendingSettlement', responseCode: decline ? 2 : 1, invoice: tr.order.invoiceNumber, description: tr.order.description,
+            authAmount: amt, settleAmount: decline || authOnly ? 0 : amt, last4: '4242', brand: 'Visa', email: tr.customer?.email || '', firstName: tr.billTo?.firstName || '', lastName: tr.billTo?.lastName || '' });
+          return decline ? { transactionResponse: { responseCode: '2', transId: t.transId, errors: [{ errorCode: '2', errorText: 'This transaction has been declined.' }] }, messages: { resultCode: 'Ok', message: [{ code: 'I00001', text: 'Successful.' }] } }
+            : ok({ transactionResponse: { responseCode: '1', transId: t.transId, authCode: 'A1B2C3', messages: [{ code: '1', description: 'This transaction has been approved.' }] } });
+        }
         const tres = (t, extra = {}) => ok({ transactionResponse: { responseCode: String(t), transId: extra.transId || (ref && ref.transId), authCode: 'A1B2C3', messages: [{ code: '1', description: 'This transaction has been approved.' }], ...extra } });
         const fail = text => ({ transactionResponse: { responseCode: '3', errors: [{ errorCode: '16', errorText: text }] }, messages: { resultCode: 'Error', message: [{ code: 'E00027', text: 'The transaction was unsuccessful.' }] } });
         if (!ref) return fail('The transaction cannot be found.');

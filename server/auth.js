@@ -162,7 +162,7 @@ function routes(r) {
     const a = readSession(ctx);
     if (!a) return { user: null };
     if (!a.session.mfa_ok) return { user: null, mfa_pending: true };
-    const out = { user: publicUser(a.user), config: { multiMerchant: config.multiMerchant, product: config.productName, livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
+    const out = { user: publicUser(a.user), config: { mfaPolicyEnv: process.env.REQUIRE_STAFF_MFA !== undefined && process.env.REQUIRE_STAFF_MFA !== '', multiMerchant: config.multiMerchant, product: config.productName, livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
     if (a.user.kind === 'merchant') out.merchant = store.get('merchants', a.user.merchant_id);
     if (a.user.kind === 'staff') { out.role = STAFF_ROLES[a.user.role]; out.perms = Object.keys(STAFF_PERMS).filter(p => staffCan(a.user, p)); }
     else out.perms = MERCHANT_ROLES[a.user.role].perms;
@@ -180,6 +180,16 @@ function routes(r) {
     if (!user.mfa_pending || !U.verifyTotp(U.unseal(user.mfa_pending), ctx.body.code)) throw bad('That code is not valid. Check your authenticator app clock.');
     user.mfa_secret = user.mfa_pending; user.mfa_pending = null; user.mfa_enabled = true; store.put('users', user);
     core.audit(user.email, 'auth.mfa_enabled', user.id, '', user.merchant_id); return { ok: true };
+  });
+  /** Turn your own 2FA off: needs the current authenticator code AND your password. Not allowed while 2FA is required. */
+  r('POST', '/auth/mfa/disable', ctx => {
+    const { user } = requireUser(ctx), t = throttle('mfa-off:' + user.id);
+    if (!user.mfa_enabled) throw bad('Two-factor authentication is already off.');
+    if (user.kind === 'staff' && config.requireStaffMfa) throw bad('Two-factor authentication is required for all admins. Switch off “Require 2FA for all admins” first.', 'mfa_required_by_policy');
+    if (!U.verifyPassword(String(ctx.body.password || ''), user.password_hash)) { t.fail(); throw bad('Password is incorrect.'); }
+    if (!U.verifyTotp(U.unseal(user.mfa_secret), ctx.body.code)) { t.fail(); throw bad('That code is not valid.'); }
+    t.ok(); user.mfa_enabled = false; user.mfa_secret = null; user.mfa_pending = null; store.put('users', user);
+    core.audit(user.email, 'auth.mfa_disabled', user.id, '', user.merchant_id); return { ok: true };
   });
   r('POST', '/auth/password', ctx => {
     const { user, session } = requireUser(ctx);

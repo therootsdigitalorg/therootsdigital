@@ -84,6 +84,12 @@ async function until(fn, ms = 15000) { const t = Date.now(); for (;;) { const v 
     assert.equal(r2.status, 403); assert.equal((await r2.json()).error.code, 'merchant_retired');
     assert.equal(store.get('merchants', old.id).status, 'approved', 'record not modified');
   });
+  await step('Auto-adopt: the only store connected before the redesign becomes the business (its key works again); once only', async () => {
+    const BIZ = require('../server/business'), old = store.list('merchants', {}).find(m => m.name === 'Old Merchant'), prev = BIZ.id();
+    BIZ.ensure(); assert.equal(BIZ.id(), old.id, 'adopted the record holding the store key');
+    assert.ok(store.list('audit', {}).some(x => x.action === 'business.adopted' && /auto/.test(x.actor)));
+    BIZ.adopt(prev, 'test'); BIZ.ensure(); assert.equal(BIZ.id(), prev, 'never re-adopts automatically after a manual choice');
+  });
 
   let wh = { secret: '', got: [] }, sk = '';
   const receiver = http.createServer((req, res) => { let raw = ''; req.on('data', d => raw += d); req.on('end', () => { try { wh.got.push(DigitalHub.constructEvent(raw, req.headers['digitalhub-signature'], wh.secret)); res.end('ok'); } catch { res.statusCode = 400; res.end('bad'); } }); }).listen(0);
@@ -251,6 +257,34 @@ async function until(fn, ms = 15000) { const t = Date.now(); for (;;) { const v 
     const r = ok(await X('GET', '/readiness')); assert.equal(r.ready_cards, false); assert.ok(r.checks.find(c => c.key === 'sandbox_flow').ok); assert.ok(r.checks.find(c => c.key === 'mfa').ok);
     assert.equal((await X('POST', '/readiness', { cards_live: true, code: code() })).body.error.code, 'not_ready');
     const live = await woo('POST', '/api/v1/woocommerce/checkout', { amount: 1000, currency: 'USD' }); assert.equal(live.status, 200, 'test key still works');
+  });
+  await step('Card fields on the store checkout (Accept.js): config needs the Public Client Key; raw card data refused; token charged and verified', async () => {
+    let cfg = (await woo('GET', '/api/v1/woocommerce/config')).body; assert.equal(cfg.available, false, 'no client key yet → hosted page fallback');
+    ok(await X('POST', '/authorize-net/sandbox', { client_key: 'Pk' + 'a1B2'.repeat(15), code: code() }));
+    cfg = (await woo('GET', '/api/v1/woocommerce/config')).body;
+    assert.equal(cfg.available, true); assert.equal(cfg.api_login_id, LOGIN); assert.match(cfg.accept_js, /Accept\.js$/); assert.ok(!JSON.stringify(cfg).includes(TKEY));
+    const base = { amount: 2599, currency: 'USD', description: 'Order 2001', metadata: { order_id: '2001' }, name: 'Card Shopper', email: 'shopper@example.com', billing: { zip: '10001', country: 'US' } };
+    const raw = await woo('POST', '/api/v1/woocommerce/checkout', { ...base, opaque_data: { descriptor: 'COMMON.ACCEPT.INAPP.PAYMENT', value: 'x'.repeat(40) }, card_number: '4111111111111111' });
+    assert.equal(raw.body.error.code, 'raw_card_refused');
+    const paidR = (await woo('POST', '/api/v1/woocommerce/checkout', { ...base, opaque_data: { descriptor: 'COMMON.ACCEPT.INAPP.PAYMENT', value: 'eyJ0b2tlbiI6IjEyMyJ9' + 'A'.repeat(40) } })).body;
+    assert.equal(paidR.paid, true); assert.equal(paidR.payment.status, 'captured'); assert.equal(paidR.payment.card.last4, '4242'); assert.equal(paidR.statuses.card, 'captured');
+    assert.equal(anetFake.st.lastOpaque.dataDescriptor, 'COMMON.ACCEPT.INAPP.PAYMENT');
+    const p = store.get('payments', paidR.payment.id); assert.equal(p.anet.channel, 'accept_js'); assert.ok(p.anet.transId); assert.ok(!JSON.stringify(p).includes('eyJ0b2tlbiI6'), 'token not stored');
+    const dec = (await woo('POST', '/api/v1/woocommerce/checkout', { ...base, metadata: { order_id: '2002' }, opaque_data: { descriptor: 'COMMON.ACCEPT.INAPP.PAYMENT', value: 'decline' + 'B'.repeat(40) } })).body;
+    assert.equal(dec.paid, false); assert.equal(dec.payment.status, 'declined'); assert.match(dec.message, /declined/);
+  });
+  await step('Your security: 2FA policy on/off (needs a code) and personal 2FA off (needs password + code)', async () => {
+    assert.equal((await a('POST', '/auth/mfa/disable', { password: 'AdminPass12345', code: code() })).body.error.code, 'mfa_required_by_policy');
+    assert.equal((await X('POST', '/security/mfa-policy', { required: false })).body.error.code, 'invalid_code');
+    assert.equal(ok(await X('POST', '/security/mfa-policy', { required: false, code: code() })).required, false);
+    assert.equal(ok(await a('GET', '/auth/me')).config.requireStaffMfa, false);
+    assert.equal((await a('POST', '/auth/mfa/disable', { password: 'wrong-pass-1', code: code() })).status, 400);
+    ok(await a('POST', '/auth/mfa/disable', { password: 'AdminPass12345', code: code() }));
+    ok(await X('GET', '/overview'), 'console usable without 2FA when the policy is off');
+    assert.equal(ok(await X('GET', '/readiness')).checks.find(c => c.key === 'mfa').ok, false, 'live readiness still demands 2FA');
+    assert.equal((await X('POST', '/security/mfa-policy', { required: true })).body.error.code, 'mfa_enrollment_required', 'cannot lock yourself out');
+    mfaSecret = ok(await a('POST', '/auth/mfa/setup')).secret; ok(await a('POST', '/auth/mfa/enable', { code: code() }));
+    assert.equal(ok(await X('POST', '/security/mfa-policy', { required: true, code: code() })).required, true);
   });
   await step('Payment links (card only), reports, CSV, security log, backup download (gzipped, complete)', async () => {
     const l = ok(await X('POST', '/links', { amount: '15.00', description: 'Consulting hour', reusable: true })); assert.deepEqual(l.payment_methods, ['card']);

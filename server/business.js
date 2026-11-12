@@ -16,7 +16,7 @@ function get() { const bid = id(); return bid ? store.get('merchants', bid) : nu
 /** Create the business record on first start of the single-business platform (idempotent). */
 function ensure(actor = 'system') {
   if (config.multiMerchant) return null;
-  const cur = get(); if (cur) return cur;
+  const cur = get(); if (cur) { autoAdopt(cur); return get(); }
   const core = require('./core');
   const m = core.newMerchant({ name: 'Digital Hub', legal_name: 'Digital Hub', country: 'US', website: '', support_email: config.adminEmail });
   Object.assign(m, { status: 'approved', risk: 'low', business: true, perms: { ...m.perms, card: true, crypto: false, payouts: false }, approval: { with_exceptions: false, by: 'system', at: Date.now(), note: 'Single-business platform owner' } });
@@ -27,6 +27,18 @@ function ensure(actor = 'system') {
   store.setMeta('migration:single_business', { at: Date.now(), retired_merchants: retired, note: 'No records were modified. Retired merchants cannot transact while MULTI_MERCHANT is off; set MULTI_MERCHANT=1 to restore.' });
   core.audit(actor, 'business.created', m.id, `single-business platform · ${retired.length} retired merchant record(s) kept as history`);
   return m;
+}
+/** After the switch to single-business, a WooCommerce store connected before the redesign still uses its old merchant's
+    API key (and would be refused). When exactly one retired record has active secret keys and the auto-created business
+    record is still untouched (no payments, no keys of its own), adopt that record automatically — once, audited. */
+function autoAdopt(cur) {
+  const m = meta(); if (!m || m.auto_adopt_checked || m.adopted_from !== undefined) return;
+  const own = store.list('api_keys', { merchant_id: cur.id }, { limit: 50 }).some(k => k.type === 'secret' && k.status === 'active');
+  if (own || store.count('payments', { merchant_id: cur.id }) > 0) { store.setMeta('business', { ...m, auto_adopt_checked: true }); return; }
+  const cands = store.list('merchants', {}, { limit: 10000 }).filter(x => x.id !== cur.id && store.list('api_keys', { merchant_id: x.id }, { limit: 50 }).some(k => k.type === 'secret' && k.status === 'active'));
+  if (cands.length !== 1) return;
+  adopt(cands[0].id, 'system (auto: the only connected store)');
+  store.setMeta('business', { ...meta(), auto_adopt_checked: true });
 }
 /** Make an existing merchant record the business (keeps its API keys, webhooks — e.g. an already connected WooCommerce store). */
 function adopt(merchantId, actor) {

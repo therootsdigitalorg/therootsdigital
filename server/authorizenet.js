@@ -22,8 +22,8 @@ const saveSettings = s => store.setMeta('anet', s);
 
 function creds(e) {
   const p = e === 'production' ? 'ANET_PRODUCTION_' : 'ANET_SANDBOX_', s = settings()[e] || {};
-  if (env(p + 'LOGIN_ID')) return { loginId: env(p + 'LOGIN_ID'), transactionKey: env(p + 'TRANSACTION_KEY'), signatureKey: env(p + 'SIGNATURE_KEY'), source: 'environment' };
-  return { loginId: s.loginId || '', transactionKey: unseal(s.transactionKey), signatureKey: unseal(s.signatureKey), source: s.loginId ? 'admin settings' : null };
+  if (env(p + 'LOGIN_ID')) return { loginId: env(p + 'LOGIN_ID'), transactionKey: env(p + 'TRANSACTION_KEY'), signatureKey: env(p + 'SIGNATURE_KEY'), clientKey: env(p + 'CLIENT_KEY') || s.clientKey || '', source: 'environment' };
+  return { loginId: s.loginId || '', transactionKey: unseal(s.transactionKey), signatureKey: unseal(s.signatureKey), clientKey: s.clientKey || '', source: s.loginId ? 'admin settings' : null };
 }
 const configured = e => { const c = creds(e); return !!(c.loginId && c.transactionKey); };
 const envForMode = mode => mode === 'live' ? 'production' : 'sandbox';
@@ -31,7 +31,7 @@ const flow = () => settings().flow === 'authOnly' ? 'authOnly' : 'authCapture';
 const mask = v => v ? `${'•'.repeat(Math.max(0, Math.min(8, v.length - 4)))}${v.slice(-4)}` : '';
 function publicConfig() {
   const s = settings(), out = { flow: flow(), environments: {} };
-  for (const e of ENVS) { const c = creds(e); out.environments[e] = { configured: configured(e), source: c.source, login_id: c.loginId ? mask(c.loginId) : null, transaction_key: c.transactionKey ? mask(c.transactionKey) : null, signature_key: !!c.signatureKey, last_test: s[e]?.lastTest || null, webhook: s[e]?.webhook || null, api: config.anet[e].api, hosted: config.anet[e].hosted }; }
+  for (const e of ENVS) { const c = creds(e); out.environments[e] = { configured: configured(e), source: c.source, login_id: c.loginId ? mask(c.loginId) : null, transaction_key: c.transactionKey ? mask(c.transactionKey) : null, signature_key: !!c.signatureKey, client_key: c.clientKey ? mask(c.clientKey) : null, last_test: s[e]?.lastTest || null, webhook: s[e]?.webhook || null, api: config.anet[e].api, hosted: config.anet[e].hosted }; }
   return out;
 }
 /** Save credentials for one environment (sealed). Values left empty keep the stored value. */
@@ -39,14 +39,15 @@ function save(e, input, actor) {
   if (!ENVS.includes(e)) throw bad('Environment must be sandbox or production.');
   if (env((e === 'production' ? 'ANET_PRODUCTION_' : 'ANET_SANDBOX_') + 'LOGIN_ID')) throw bad('This environment is configured by environment variables in Vercel.');
   const s = settings(), cur = s[e] || {};
-  const loginId = String(input.login_id ?? '').trim(), key = String(input.transaction_key ?? '').trim(), sig = String(input.signature_key ?? '').trim();
+  const loginId = String(input.login_id ?? '').trim(), key = String(input.transaction_key ?? '').trim(), sig = String(input.signature_key ?? '').trim(), ck = String(input.client_key ?? '').trim();
+  if (ck && !/^[A-Za-z0-9]{40,100}$/.test(ck)) throw bad('Public Client Key: letters and digits (Authorize.Net → Account → Settings → Security Settings → Manage Public Client Key).');
   if (loginId && !/^[A-Za-z0-9]{6,25}$/.test(loginId)) throw bad('API Login ID: letters and digits only (Authorize.Net → Account → API Credentials & Keys).');
   if (key && !/^[A-Za-z0-9]{16}$/.test(key)) throw bad('Transaction Key is 16 letters/digits.');
   if (sig && !/^[0-9a-fA-F]{128}$/.test(sig)) throw bad('Signature Key is 128 hexadecimal characters.');
-  s[e] = { ...cur, ...(loginId ? { loginId } : {}), ...(key ? { transactionKey: U.seal(key) } : {}), ...(sig ? { signatureKey: U.seal(sig) } : {}), lastTest: null };
+  s[e] = { ...cur, ...(loginId ? { loginId } : {}), ...(key ? { transactionKey: U.seal(key) } : {}), ...(sig ? { signatureKey: U.seal(sig) } : {}), ...(ck ? { clientKey: ck } : {}), lastTest: loginId || key ? null : cur.lastTest || null };
   if (input.flow) s.flow = input.flow === 'authOnly' ? 'authOnly' : 'authCapture';
   saveSettings(s);
-  require('./core').audit(actor, 'authorize_net.credentials_saved', e, [loginId && 'login id', key && 'transaction key', sig && 'signature key'].filter(Boolean).join(', ') || 'settings');
+  require('./core').audit(actor, 'authorize_net.credentials_saved', e, [loginId && 'login id', key && 'transaction key', sig && 'signature key', ck && 'public client key'].filter(Boolean).join(', ') || 'settings');
 }
 function clear(e, actor) { const s = settings(); s[e] = {}; saveSettings(s); require('./core').audit(actor, 'authorize_net.credentials_removed', e, ''); }
 
@@ -127,6 +128,28 @@ async function transaction(e, tr, what) {
   if (!r.ok || String(t.responseCode) !== '1') fail(r, what);
   return { transId: t.transId, authCode: t.authCode || null, responseCode: t.responseCode, message: t.messages?.[0]?.description || r.text };
 }
+/** Accept.js: the browser tokenises the card directly with Authorize.Net (opaqueData); Digital Hub only receives the
+    one-time token and charges it here. Declines are returned (not thrown) so the caller can record them. */
+async function chargeOpaque(e, { amount, invoice, description, email, billTo = {}, opaque, customerIP, refId }) {
+  const s = v => String(v ?? '').trim();
+  const tr = { transactionType: flow() === 'authOnly' ? 'authOnlyTransaction' : 'authCaptureTransaction', amount: money(amount),
+    payment: { opaqueData: { dataDescriptor: s(opaque.descriptor), dataValue: s(opaque.value) } },
+    order: { invoiceNumber: s(invoice).slice(0, 20), description: s(description).slice(0, 255) } };
+  if (email) tr.customer = { email: s(email).slice(0, 255) };
+  const bt = {};
+  for (const [k, max] of [['firstName', 50], ['lastName', 50], ['company', 50], ['address', 60], ['city', 40], ['state', 40], ['zip', 20], ['country', 60]]) if (s(billTo[k])) bt[k] = s(billTo[k]).slice(0, max);
+  if (Object.keys(bt).length) tr.billTo = bt;
+  if (customerIP && /^[0-9a-fA-F:.]{3,45}$/.test(customerIP)) tr.customerIP = customerIP;
+  const r = await call(e, 'createTransactionRequest', { refId: s(refId).slice(0, 20), transactionRequest: tr });
+  const t = r.data.transactionResponse || {};
+  return { ok: r.ok && String(t.responseCode) === '1', responseCode: String(t.responseCode || ''), transId: t.transId && t.transId !== '0' ? String(t.transId) : null,
+    message: t.errors?.[0]?.errorText || t.messages?.[0]?.description || r.text || 'Card payment failed', errorCode: t.errors?.[0]?.errorCode || r.code || null };
+}
+/** What the WooCommerce plugin needs to render Accept.js card fields (public values only). */
+function acceptConfig(e) {
+  const c = creds(e);
+  return { environment: e, available: configured(e) && !!c.clientKey, api_login_id: c.clientKey ? c.loginId : null, client_key: c.clientKey || null, accept_js: config.anet[e].acceptJs, flow: flow() };
+}
 const capture = (e, transId, amount) => transaction(e, { transactionType: 'priorAuthCaptureTransaction', amount: money(amount), refTransId: String(transId) }, 'Capture failed');
 const voidTx = (e, transId) => transaction(e, { transactionType: 'voidTransaction', refTransId: String(transId) }, 'Void failed');
 /** Refund a settled transaction: Authorize.Net requires the card's last four digits and "XXXX" as expiry. */
@@ -178,5 +201,5 @@ function mapStatus(tx) {
   return { card, settlement, raw: st, held: /Review/.test(st) };
 }
 
-module.exports = { ENVS, creds, configured, envForMode, flow, publicConfig, save, clear, call, testConnection, hostedToken, details, unsettled, settledBatches, batchTransactions, capture, voidTx, refund,
+module.exports = { chargeOpaque, acceptConfig, ENVS, creds, configured, envForMode, flow, publicConfig, save, clear, call, testConnection, hostedToken, details, unsettled, settledBatches, batchTransactions, capture, voidTx, refund,
   verifyWebhook, registerWebhook, WEBHOOK_EVENTS, mapStatus, money, cents };

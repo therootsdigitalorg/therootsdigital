@@ -296,3 +296,7 @@ pre.code{background:var(--bg);border:1px solid var(--line);border-radius:8px;pad
 .timeline li{position:relative;padding:0 0 12px 14px}
 .timeline li::before{content:"";position:absolute;left:-6px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--grad)}
 .pill-row{display:flex;flex-wrap:wrap;gap:8px}
+.mode-switch:disabled{opacity:.55;cursor:not-allowed}
+.mode-switch.sw[aria-checked="true"] .knob{background:var(--accent)}
+.mode-switch.sw[aria-checked="true"] .knob::after{background:#fff}
+.mode-switch.sw[aria-checked="true"]{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}

@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:       Digital Hub Payments
- * Description:       Accept card payments in USD through Digital Hub (Authorize.Net secure hosted payment page). Card data never touches your store or Digital Hub.
- * Version:           3.0.0
+ * Description:       Accept card payments in USD through Digital Hub and Authorize.Net, with card fields on your checkout (Accept.js). Card data never touches your store or Digital Hub.
+ * Version:           3.1.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('DIGITALHUB_WC_VERSION', '3.0.0');
+define('DIGITALHUB_WC_VERSION', '3.1.0');
 define('DIGITALHUB_WC_FILE', __FILE__);
 
 add_action('before_woocommerce_init', function () {
@@ -38,24 +38,24 @@ add_action('plugins_loaded', function () {
     class WC_Gateway_DigitalHub extends WC_Payment_Gateway
     {
         const SUPPORTED = ['USD'];
-        const DEFAULT_TITLE = 'Credit / Debit Card';
-        const DEFAULT_DESCRIPTION = 'Pay securely by card on our payment processor\'s secure page.';
+        const DEFAULT_TITLE = 'Credit/Debit Cards';
+        const DEFAULT_DESCRIPTION = '';
 
         public function __construct()
         {
             $this->id                 = 'digitalhub';
             $this->method_title       = 'Digital Hub Payments';
-            $this->method_description = 'Card payments in USD through Digital Hub. Customers enter their card on the Authorize.Net secure hosted payment page. Store currency must be USD.';
-            $this->has_fields         = false;
+            $this->method_description = 'Card payments in USD through Digital Hub and Authorize.Net. Card fields appear on your checkout (Authorize.Net Accept.js: the card goes from the shopper\'s browser straight to Authorize.Net, never to your server). Without a Public Client Key in Digital Hub, customers pay on the Authorize.Net hosted page instead. Store currency must be USD.';
+            $this->has_fields         = true;
             $this->supports           = ['products', 'refunds'];
             $this->init_form_fields();
             $this->init_settings();
             $this->title = $this->get_option('title');
-            if ($this->title === '' || stripos($this->title, 'USDT') !== false || stripos($this->title, 'wallet') !== false || $this->title === 'Visa / Mastercard') { // titles from older plugin versions
+            if ($this->title === '' || stripos($this->title, 'USDT') !== false || stripos($this->title, 'wallet') !== false || in_array($this->title, ['Visa / Mastercard', 'Digital Hub', 'Credit / Debit Card'], true)) { // titles from older plugin versions
                 $this->title = self::DEFAULT_TITLE;
             }
             $this->description = $this->get_option('description');
-            if (stripos($this->description, 'digital wallet') !== false || stripos($this->description, 'Mastercard') !== false || $this->description === '') {
+            if (stripos($this->description, 'wallet') !== false || stripos($this->description, 'Mastercard') !== false || stripos($this->description, 'secure page') !== false) { // texts from older plugin versions
                 $this->description = self::DEFAULT_DESCRIPTION;
             }
             $this->enabled = $this->get_option('enabled');
@@ -63,6 +63,81 @@ add_action('plugins_loaded', function () {
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, [$this, 'process_admin_options']);
             add_action('woocommerce_api_digitalhub', [$this, 'handle_webhook']);
             add_action('woocommerce_thankyou_' . $this->id, [$this, 'check_on_return']);
+            add_action('wp_enqueue_scripts', [$this, 'enqueue_card_scripts']);
+        }
+
+        /**
+         * Accept.js settings from Digital Hub (public values only: API Login ID + Public Client Key), cached 10 minutes.
+         * When they are not configured the gateway falls back to the secure hosted payment page.
+         */
+        public function accept_config()
+        {
+            if ($this->enabled !== 'yes' || !$this->get_option('api_base') || !$this->secret_key()) {
+                return null;
+            }
+            $key = 'digitalhub_accept_' . md5($this->get_option('api_base') . '|' . $this->get_option('test_mode'));
+            $cfg = get_transient($key);
+            if ($cfg === false) {
+                try {
+                    $cfg = $this->api('GET', '/api/v1/woocommerce/config');
+                } catch (Exception $e) {
+                    $cfg = ['available' => false];
+                }
+                set_transient($key, $cfg, 10 * MINUTE_IN_SECONDS);
+            }
+            return !empty($cfg['available']) && !empty($cfg['client_key']) && !empty($cfg['api_login_id']) ? $cfg : null;
+        }
+
+        public function enqueue_card_scripts()
+        {
+            if (!(is_checkout() || is_checkout_pay_page()) || !$this->is_available()) {
+                return;
+            }
+            $cfg = $this->accept_config();
+            wp_register_style('digitalhub-card', plugins_url('assets/card.css', DIGITALHUB_WC_FILE), [], DIGITALHUB_WC_VERSION);
+            wp_enqueue_style('digitalhub-card');
+            if (!$cfg) {
+                return;
+            }
+            wp_register_script('authorize-net-accept', $cfg['accept_js'], [], null, true); // official Authorize.Net Accept.js (no version: served by Authorize.Net)
+            wp_register_script('digitalhub-card', plugins_url('assets/card.js', DIGITALHUB_WC_FILE), ['jquery', 'authorize-net-accept'], DIGITALHUB_WC_VERSION, true);
+            wp_localize_script('digitalhub-card', 'digitalhubCard', ['apiLoginID' => $cfg['api_login_id'], 'clientKey' => $cfg['client_key']]);
+            wp_enqueue_script('digitalhub-card');
+        }
+
+        private static function brand_icons()
+        {
+            return '<span class="dh-brands"><span class="dh-brand amex" data-brand="amex">AMEX</span><span class="dh-brand disc" data-brand="disc">DISC<i></i>VER</span><span class="dh-brand visa" data-brand="visa">VISA</span><span class="dh-brand mc" data-brand="mc"><b></b><b></b></span></span>';
+        }
+
+        /** Card form on the checkout page. The card inputs have no name attribute: they are never posted to WordPress. */
+        public function payment_fields()
+        {
+            $cfg = $this->accept_config();
+            if (!$cfg) {
+                echo wpautop(wptexturize(esc_html($this->description)));
+                return;
+            }
+            if ($this->description) {
+                echo '<p class="dh-note" style="margin-top:0">' . esc_html($this->description) . '</p>';
+            }
+            echo '<div class="dh-card">'
+                . '<div class="dh-panel">'
+                . '<div class="dh-secure"><svg width="15" height="15" viewBox="0 0 24 24" fill="#16a34a" aria-hidden="true"><path d="M17 9V7A5 5 0 0 0 7 7v2a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2zM9 7a3 3 0 0 1 6 0v2H9z"/></svg>Secure card payment</div>'
+                . '<label class="dh-field"><span>Card number</span><div class="dh-input with-icons"><input id="dh-card-number" type="text" inputmode="numeric" autocomplete="cc-number" placeholder="1234 1234 1234 1234"><span class="dh-icons">' . self::brand_icons() . '</span></div></label>'
+                . '<div class="dh-row">'
+                . '<label class="dh-field"><span>Expiration date</span><div class="dh-input"><input id="dh-card-exp" type="text" inputmode="numeric" autocomplete="cc-exp" placeholder="MM / YY"></div></label>'
+                . '<label class="dh-field"><span>Security code</span><div class="dh-input"><input id="dh-card-cvc" type="text" inputmode="numeric" autocomplete="cc-csc" placeholder="CVC"><span class="dh-cvc-icon"></span></div></label>'
+                . '</div><div class="dh-error" role="alert"></div></div>'
+                . '<input type="hidden" name="digitalhub_opaque_descriptor" id="digitalhub_opaque_descriptor" value="">'
+                . '<input type="hidden" name="digitalhub_opaque_value" id="digitalhub_opaque_value" value="">'
+                . '</div>';
+        }
+
+        /** Card brand marks next to the method title, like other card gateways. */
+        public function get_icon()
+        {
+            return apply_filters('woocommerce_gateway_icon', self::brand_icons(), $this->id);
         }
 
         public function init_form_fields()
@@ -130,6 +205,13 @@ add_action('plugins_loaded', function () {
                     throw new Exception('Digital Hub checkout requires the order to be priced in USD.');
                 }
                 $amount  = self::minor($order->get_total());
+                $opaque  = isset($_POST['digitalhub_opaque_value']) ? sanitize_text_field(wp_unslash($_POST['digitalhub_opaque_value'])) : '';
+                if ($opaque !== '') {
+                    return $this->charge_token($order, $amount, $currency, $opaque);
+                }
+                if ($this->accept_config()) {
+                    throw new Exception('Please enter your card details.');
+                }
                 $session = $this->api('POST', '/api/v1/woocommerce/checkout', [
                     'amount'          => $amount,
                     'currency'        => $currency,
@@ -148,6 +230,48 @@ add_action('plugins_loaded', function () {
                 wc_add_notice('Payment error: ' . $e->getMessage(), 'error');
                 return ['result' => 'failure'];
             }
+        }
+
+        /**
+         * Charge the Accept.js token through Digital Hub. The order is completed only when Digital Hub reports the payment
+         * captured (it verifies the transaction with Authorize.Net before answering); authorised-only payments go on hold.
+         */
+        private function charge_token($order, $amount, $currency, $opaque)
+        {
+            $descriptor = isset($_POST['digitalhub_opaque_descriptor']) ? sanitize_text_field(wp_unslash($_POST['digitalhub_opaque_descriptor'])) : '';
+            $res = $this->api('POST', '/api/v1/woocommerce/checkout', [
+                'amount'      => $amount,
+                'currency'    => $currency,
+                'description' => sprintf('Order #%s – %s', $order->get_order_number(), get_bloginfo('name')),
+                'customer_email' => $order->get_billing_email(),
+                'metadata'    => ['order_id' => (string) $order->get_id(), 'order_key' => $order->get_order_key(), 'site' => home_url()],
+                'opaque_data' => ['descriptor' => $descriptor, 'value' => $opaque],
+                'name'        => trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name()),
+                'email'       => $order->get_billing_email(),
+                'billing'     => ['address' => $order->get_billing_address_1(), 'city' => $order->get_billing_city(), 'state' => $order->get_billing_state(), 'zip' => $order->get_billing_postcode(), 'country' => $order->get_billing_country(), 'phone' => $order->get_billing_phone()],
+                'customer_ip' => $order->get_customer_ip_address(),
+            ], 'wc_' . $order->get_id() . '_' . $amount . '_' . substr(hash('sha256', $opaque), 0, 24)); // one key per card token
+            $session = $res['session'];
+            $payment = $res['payment'];
+            $order->update_meta_data('_digitalhub_session', $session['id']);
+            $card = !empty($payment['card']['last4']) ? sprintf('%s ending %s', $payment['card']['brand'], $payment['card']['last4']) : 'card';
+            if (!empty($res['paid'])) {
+                $order->save();
+                $order->payment_complete($payment['id']);
+                $order->add_order_note(sprintf('Digital Hub: %s charged — %s%s', $card, $payment['id'], $session['livemode'] ? '' : ' (TEST)'));
+                WC()->cart && WC()->cart->empty_cart();
+                return ['result' => 'success', 'redirect' => $this->get_return_url($order)];
+            }
+            if (!empty($res['authorized'])) {
+                $order->set_transaction_id($payment['id']);
+                $order->update_status('on-hold', sprintf('Digital Hub: %s authorised, waiting for capture — %s', $card, $payment['id']));
+                $order->save();
+                WC()->cart && WC()->cart->empty_cart();
+                return ['result' => 'success', 'redirect' => $this->get_return_url($order)];
+            }
+            $order->add_order_note('Digital Hub: card payment not approved — ' . ($res['message'] ?: $payment['status']));
+            $order->save();
+            throw new Exception(isset($payment['status']) && $payment['status'] === 'pending' ? 'Your payment is under review. Please do not pay again; the store will contact you.' : ($res['message'] ?: 'Your card was declined.'));
         }
 
         /** Verify DigitalHub-Signature: t=…,v1=HMAC-SHA256(secret, t.body). */

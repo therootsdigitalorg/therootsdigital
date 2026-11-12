@@ -220,6 +220,16 @@ function routes(r) {
       rejected_webhooks: store.list('provider_events', { status: 'rejected' }, { limit: 50 }).length };
   });
 
+  /** "Require 2FA for all admins" on/off (Super Admin). Turning it off needs a fresh code; live readiness still requires 2FA. */
+  X('POST', '/security/mfa-policy', 'staff.manage', (ctx, c) => {
+    if (process.env.REQUIRE_STAFF_MFA !== undefined && process.env.REQUIRE_STAFF_MFA !== '') throw bad('Set by REQUIRE_STAFF_MFA in the server environment.');
+    const on = !!ctx.body.required;
+    if (on && !c.user.mfa_enabled) throw bad('Turn on two-factor authentication for your own account first, otherwise you would lock yourself out.', 'mfa_enrollment_required');
+    if (c.user.mfa_enabled) needCode(c.user, ctx.body.code);
+    core.setPlatform({ adminMfa: on }); core.audit(c.actor, 'security.mfa_policy', 'platform', on ? 'required' : 'optional');
+    return { required: config.requireStaffMfa };
+  });
+
   /* ---------------- Settings ---------------- */
   X('GET', '/settings', null, (ctx, c) => {
     const bizId = c.m.id, retired = store.list('merchants', {}, { limit: 10000 }).filter(x => x.id !== bizId);

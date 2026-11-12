@@ -95,6 +95,39 @@ async function start(s, input) {
   return { payment: p, form: { action: tok.url, token: tok.token } };
 }
 
+/* ---------------- Accept.js (card fields on the store's checkout page) ----------------
+   The shopper's browser sends the card to Authorize.Net and gets a one-time opaque token; only that token reaches us.
+   After the charge call, the result is still taken from a getTransactionDetails lookup (same rules as the hosted page). */
+async function chargeToken(s, input, ip) {
+  const m = core.merchant(s.merchant_id); core.assertMode(m, s.mode); core.sessionPayable(s);
+  if (!s.methods.includes('card') || !available(s.mode)) throw new HttpError(409, 'card_unavailable', unavailableReason(s.mode) || 'Card payments are not available.');
+  if (s.currency !== 'USD') throw bad('Card payments are processed in USD.', 'currency_unsupported');
+  const od = input.opaque_data || {};
+  if (od.descriptor !== 'COMMON.ACCEPT.INAPP.PAYMENT' || !/^[A-Za-z0-9+/=._-]{20,8192}$/.test(String(od.value || ''))) throw bad('Card token missing or invalid. The card must be tokenised with Accept.js in the browser.', 'token_invalid');
+  if (input.card_number || input.cardNumber || input.cvc || input.cardCode) throw bad('Raw card data is never accepted. Send only the Accept.js token.', 'raw_card_refused');
+  if (++s.card_attempts > 10) { store.put('checkout_sessions', s); throw new HttpError(429, 'too_many_attempts', 'Too many card attempts for this checkout.'); }
+  const c = customerInput({ name: input.name || [input.first_name, input.last_name].filter(Boolean).join(' '), email: input.email, ...(input.billing || {}) }), e = anet.envForMode(s.mode);
+  const cus = upsertCustomer(m.id, c, s.mode);
+  const p = core.newPayment(s, 'card', { name: c.name, email: c.email, country: c.billing.country || null, phone: c.phone || null });
+  const invoice = newInvoice();
+  Object.assign(p, { provider: 'authorize_net', k: invoice, customer_id: cus?.id || null, settlement_status: null, card: null, anet: { env: e, invoice, flow: anet.flow(), transId: null, raw: null, channel: 'accept_js' } });
+  core.addEvent(p, 'created', `Card token received from the store checkout (Accept.js, invoice ${invoice})`);
+  store.tx(() => { store.put('payments', p); s.payment_id = p.id; store.put('checkout_sessions', s); });
+  const r = await anet.chargeOpaque(e, { amount: s.amount, invoice, description: s.description, email: c.email, opaque: od, customerIP: input.customer_ip || null, refId: p.id.slice(-20),
+    billTo: { firstName: c.firstName, lastName: c.lastName, address: c.billing.address, city: c.billing.city, state: c.billing.state, zip: c.billing.zip, country: c.billing.country } });
+  core.audit('checkout', 'card.accept_js_charge', p.id, `${fmt(p.amount, 'USD')} · ${invoice} · response ${r.responseCode || r.errorCode}`, m.id);
+  if (r.transId) {
+    const fresh = store.get('payments', p.id); fresh.anet.transId = r.transId; store.put('payments', fresh);
+    const tx = await anet.details(e, r.transId);
+    return { payment: apply(store.get('payments', p.id), tx, 'api lookup after charge'), message: r.message };
+  }
+  return store.tx(() => { // rejected before a transaction existed (bad token, validation error)
+    const fresh = store.get('payments', p.id); fresh.status = 'declined'; fresh.declineCode = r.errorCode || 'error'; core.addEvent(fresh, 'declined', r.message); store.put('payments', fresh);
+    core.emit(fresh.merchant_id, fresh.mode, 'payment.failed', core.publicPayment(fresh));
+    return { payment: fresh, message: r.message };
+  });
+}
+
 /* ---------------- reconcile (server-side lookup) ---------------- */
 const lastLookup = new Map();
 /** Find the Authorize.Net transaction for a payment and apply it. Throttled per payment unless force. */
@@ -280,4 +313,4 @@ const publicCard = p => ({ id: p.id, created: p.created_at, mode: p.mode, amount
   refunded: p.refunded || 0, captured: p.captured || 0, statuses: statuses(p), raw_status: p.anet?.raw || null, batch: p.anet?.batch || null, settlement_id: p.settlement_id || null, session: p.session_id,
   order_id: p.metadata?.order_id || null, events: p.events, checked_at: p.anet?.checked_at || null });
 
-module.exports = { A, available, unavailableReason, start, reconcile, apply, capture, voidPayment, refund, recordRefund, recordDispute, resolveDispute, webhook, statuses, publicCard, upsertCustomer, newInvoice };
+module.exports = { chargeToken, A, available, unavailableReason, start, reconcile, apply, capture, voidPayment, refund, recordRefund, recordDispute, resolveDispute, webhook, statuses, publicCard, upsertCustomer, newInvoice };

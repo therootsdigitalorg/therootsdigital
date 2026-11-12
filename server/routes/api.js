@@ -83,7 +83,15 @@ function routes(r) {
   get('/v1/refunds/:id', 'payments:read', async (ctx, a) => anyRefund(await usdc.refreshRefund(owned('refunds', ctx.params.id, a))));
 
   /* WooCommerce aliases (same API keys and scopes as /v1) */
-  post('/api/v1/woocommerce/checkout', 'checkout:write', (ctx, a) => core.publicSession(core.createSession(a.m, a.mode, { ...ctx.body, payment_methods: ['card'] }, actor(a))));
+  /** Without opaque_data: creates a session for the hosted payment page (redirect). With opaque_data (Accept.js token from
+      the store's checkout page): creates the session and charges the token at once; the response says whether it was paid. */
+  post('/api/v1/woocommerce/checkout', 'checkout:write', async (ctx, a) => {
+    const s = core.createSession(a.m, a.mode, { ...ctx.body, payment_methods: ['card'] }, actor(a));
+    if (!ctx.body.opaque_data) return core.publicSession(s);
+    const r = await cards.chargeToken(s, ctx.body, ctx.ip), fresh = store.get('checkout_sessions', s.id);
+    return { session: core.publicSession(fresh), payment: core.publicPayment(r.payment), statuses: cards.statuses(r.payment), paid: fresh.status === 'complete', authorized: r.payment.status === 'authorized', message: r.payment.status === 'declined' || r.payment.status === 'pending' ? r.message : null };
+  });
+  get('/api/v1/woocommerce/config', 'checkout:read', (ctx, a) => ({ ...require('../authorizenet').acceptConfig(require('../authorizenet').envForMode(a.mode)), cards_available: cards.available(a.mode), livemode: a.mode === 'live' }));
   get('/api/v1/woocommerce/payment-status', 'checkout:read', async (ctx, a) => {
     let s = ctx.query.session ? owned('checkout_sessions', String(ctx.query.session), a) : null;
     if (!s && ctx.query.order_id) s = store.list('checkout_sessions', { merchant_id: a.m.id, mode: a.mode }, { limit: 5000 }).find(x => String(x.metadata?.order_id || '') === String(ctx.query.order_id));
