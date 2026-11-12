@@ -32,7 +32,7 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
 (async () => {
   const [sepUrl, mainUrl, wrongUrl] = [await sepolia.listen(), await mainnet.listen(), await wrongChain.listen()];
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dh-test-'));
-  Object.assign(process.env, { DB_PATH: path.join(tmp, 'test.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1',
+  Object.assign(process.env, { MULTI_MERCHANT: '1', DB_PATH: path.join(tmp, 'test.db'), PORT: '0', SEED_DEMO: '1', ADMIN_PASSWORD: 'AdminPass12345', NODE_ENV: 'test', ALLOW_PRIVATE_WEBHOOKS: '1',
     BASE_SEPOLIA_RPC_URLS: sepUrl, BASE_RPC_URLS: mainUrl, CHAIN_POLL_MS: '3600000',
     // isolate from a developer's real .env: no Supabase project during tests unless a step sets one
     SUPABASE_URL: '', SUPABASE_ANON_KEY: '', SUPABASE_PUBLISHABLE_KEY: '', SUPABASE_SECRET_KEY: '', SUPABASE_JWKS_URL: '', SUPABASE_JWKS: '' });
@@ -517,7 +517,7 @@ const ok = (r, msg = '') => { if (r.status !== 200) throw new Error(`${msg} HTTP
   await step('Ledger: database refuses edits to posted entries', async () => { assert.throws(() => store.db.exec('UPDATE ledger SET amount = 0 WHERE id = 1'), /append-only/); });
   await step('Diagnostics: /api/health reports setup without leaking secrets', async () => { const h = ok(await pub('GET', '/api/health')); assert.equal(h.ok, true); assert.equal(h.database.schema_version, null === h.database.schema_version ? null : h.database.schema_version); assert.ok(h.database.users >= 1); const s = JSON.stringify(h); assert.ok(!s.includes(secret) && !s.includes('AdminPass12345')); });
   await step('Security headers: CSP allows MetaMask Connect only from pinned hosts', async () => { const r = await fetch(BASE + '/app'); const csp = r.headers.get('content-security-policy'); assert.doesNotMatch(csp, /cdn\.jsdelivr\.net/, 'MetaMask Connect is self-hosted'); assert.match(csp, /wss:\/\/\*\.metamask\.io/); const sdk = await fetch(BASE + '/vendor/mm-connect/connect-evm.js'); assert.equal(sdk.status, 200); assert.match(await sdk.text(), /createEVMClient/); assert.match(csp, /frame-ancestors 'none'/); });
-  await step('Downloads: WooCommerce plugin zip (v2, USDC)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['card', 'wallet']")); assert.ok(!/USDC \(MetaMask\)'\]|Pay with USDC/.test(b.toString('latin1').replace("'USDC (MetaMask)'];", '')), 'plugin shows card / wallet in USD'); });
+  await step('Downloads: WooCommerce plugin zip (v3 "Digital Hub Payments", card)', async () => { const r = await fetch(BASE + '/downloads/digitalhub-woocommerce.zip'); assert.equal(r.status, 200); const b = Buffer.from(await r.arrayBuffer()); assert.equal(b.readUInt32LE(0), 0x04034b50); assert.ok(b.toString('latin1').includes("'payment_methods' => ['card']")); assert.ok(!/MetaMask|Pay with USDC/.test(b.toString('latin1')), 'plugin shows card payments in USD'); });
 
   console.log(`\n${passed} checks passed${failed ? `, ${failed} FAILED` : ''}.`);
   receiver.close(); server.close(); sepolia.server.close(); mainnet.server.close(); wrongChain.server.close(); setTimeout(() => process.exit(), 100);

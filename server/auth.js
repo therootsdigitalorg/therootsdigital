@@ -120,6 +120,7 @@ async function supabaseAdmin(email, password) {
 
 function routes(r) {
   r('POST', '/auth/signup', ctx => {
+    if (!config.multiMerchant) throw new HttpError(404, 'signup_closed', 'Registration is closed: Digital Hub is a single-business platform.');
     const b = ctx.body, t = throttle('signup:' + ctx.ip);
     const business = U.str(b.business_name, 120); if (business.length < 2) throw bad('Enter your business name.');
     const country = U.str(b.country, 2).toUpperCase(); if (!/^[A-Z]{2}$/.test(country)) throw bad('Choose your country.');
@@ -140,6 +141,7 @@ function routes(r) {
       u = await supabaseAdmin(email, String(ctx.body.password || ''));
       if (!u) { t.fail(); throw new HttpError(401, 'invalid_credentials', 'Email or password is incorrect.'); }
     }
+    if (!config.multiMerchant && u.kind !== 'staff') { t.fail(); throw new HttpError(403, 'merchant_login_retired', 'Merchant accounts are retired on this platform. Contact the Digital Hub administrator.'); }
     t.ok(); startSession(ctx, u, !u.mfa_enabled);
     u.last_login = Date.now(); store.put('users', u);
     core.audit(u.email, 'auth.login', u.id, ctx.ip, u.merchant_id);
@@ -160,7 +162,7 @@ function routes(r) {
     const a = readSession(ctx);
     if (!a) return { user: null };
     if (!a.session.mfa_ok) return { user: null, mfa_pending: true };
-    const out = { user: publicUser(a.user), config: { livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
+    const out = { user: publicUser(a.user), config: { multiMerchant: config.multiMerchant, product: config.productName, livePayments: config.livePayments, requireStaffMfa: config.requireStaffMfa, sandboxDayMs: config.sandboxDayMs, publicUrl: config.publicUrl } };
     if (a.user.kind === 'merchant') out.merchant = store.get('merchants', a.user.merchant_id);
     if (a.user.kind === 'staff') { out.role = STAFF_ROLES[a.user.role]; out.perms = Object.keys(STAFF_PERMS).filter(p => staffCan(a.user, p)); }
     else out.perms = MERCHANT_ROLES[a.user.role].perms;

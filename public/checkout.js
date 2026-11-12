@@ -2,7 +2,11 @@
 /* Hosted checkout — MetaMask USDC on Base. Talks only to /c-api with the unguessable session ID; never sees API keys.
    Flow: connect MetaMask → switch to the right Base network → sign a free wallet confirmation → send a plain USDC
    transfer to the merchant's verified wallet → the server verifies the receipt on-chain and counts confirmations.
-   The page shows "paid" only when the server says the invoice is paid. */
+   The page shows "paid" only when the server says the invoice is paid.
+   Single-business platform: cards go through Authorize.Net Accept Hosted — this page collects name / email / billing,
+   gets a one-time token from the server and form-POSTs it to Authorize.Net, where the customer types the card. On the way
+   back (?return=1) the server looks the transaction up with Authorize.Net; the redirect itself never marks anything paid. */
+const QS = new URLSearchParams(location.search);
 const $ = (s, el = document) => el.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (m, c) => { const s = (Math.abs(m) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return c === 'USDC' ? `${s} USDC` : c === 'USD' ? `$${s}` : `${s} ${c}`; };
@@ -31,8 +35,10 @@ async function load() {
   catch (e) { $('#co').innerHTML = `<div class="co-body"><div class="result"><div class="icon" style="background:var(--danger-soft);color:var(--danger)">!</div><h2>Checkout unavailable</h2><p class="muted">${esc(e.message)}</p><button class="btn" type="button" id="reloadCo">Try again</button></div></div>`; $('#reloadCo').onclick = () => location.reload(); return; } // no inline handlers: the CSP blocks them
   const s = st.s;
   if (s.customer_email && !st.email) st.email = s.customer_email;
-  $('#banner').innerHTML = s.mode === 'test' ? '<div class="test-banner">Test mode · Base Sepolia testnet · test USDC has no value</div>' : '';
-  $('#modeNote').textContent = s.mode === 'test' ? 'Base Sepolia testnet' : 'Base mainnet';
+  const hosted = !!s.card?.hosted;
+  $('#banner').innerHTML = s.mode === 'test' ? `<div class="test-banner">${hosted ? 'Test mode · Authorize.Net sandbox · no real money' : 'Test mode · Base Sepolia testnet · test USDC has no value'}</div>` : '';
+  $('#modeNote').textContent = hosted ? (s.mode === 'test' ? 'sandbox' : '') : s.mode === 'test' ? 'Base Sepolia testnet' : 'Base mainnet';
+  if (hosted) { $('#coFoot').innerHTML = 'Secured by Digital Hub · Card details are entered on Authorize.Net’s secure payment page and never reach this site.'; if (QS.get('canceled') === '1') st.error = 'Payment was cancelled. You can try again.'; route(); draw(); return; }
   st.detected = await MM.detect();
   if (st.detected) { const w = await MM.reconnect().catch(() => null); if (w) st.wallet = w; }
   route(); draw();
@@ -40,6 +46,15 @@ async function load() {
 }
 function route() {
   const s = st.s, p = s.payment;
+  if (s.card?.hosted) { // Authorize.Net Accept Hosted
+    st.method = 'card'; stopPoll();
+    if (s.status === 'complete' || (p && ['captured', 'authorized', 'partially_refunded', 'refunded'].includes(p.status))) st.step = 'done';
+    else if (s.status === 'expired') st.step = 'expired';
+    else if (p && p.status === 'pending') st.step = 'review';
+    else if (p && p.status === 'created' && QS.get('return') === '1' && (st.verifyTries || 0) < 8) { st.step = 'verifying'; startVerify(); }
+    else { st.step = 'connect'; if (p && p.status === 'declined' && QS.get('return') === '1' && !st.declineShown) { st.declineShown = true; st.error = 'Your bank declined the payment. You can try again with another card.'; } }
+    return;
+  }
   if (!st.method || !s.methods.includes(st.method)) st.method = p?.method === 'usdc' ? 'usdc' : s.methods.includes('card') ? 'card' : s.methods[0]; // card first
   if (s.status === 'complete' || (p && ['confirmed', 'overpaid', 'partially_refunded', 'refunded', 'captured', 'authorized', 'settled'].includes(p.status))) st.step = 'done';
   else if (p && p.method === 'card' && p.status === 'requires_action') { st.step = '3ds'; st.method = 'card'; }
@@ -60,6 +75,9 @@ function draw() {
   const s = st.s; let body = '';
   if (!s.methods.length) body = `<div class="note warn"><span>No payment method is available for this checkout right now. Please contact ${esc(s.merchant.name)}${s.merchant.support_email ? ` (${esc(s.merchant.support_email)})` : ''}.</span></div>`;
   else if (st.step === '3ds') body = threeDSView();
+  else if (st.step === 'connect' && s.card?.hosted) body = hostedView();
+  else if (st.step === 'verifying') body = result('…', 'info', 'Confirming your payment', 'Checking the result with the card processor. This takes a few seconds — please keep this page open.');
+  else if (st.step === 'review') body = result('!', 'warn', 'Payment under review', `Your payment is being reviewed by the card processor. ${esc(s.merchant.name)} will confirm your order once it is approved. Do not pay again.`);
   else if (st.step === 'connect' && st.method === 'card') body = methodTabs() + cardView();
   else if (st.step === 'done') body = success();
   else if (st.step === 'expired') body = result('×', 'neutral', 'This checkout has expired', 'Return to the store and start again.');
@@ -91,6 +109,25 @@ function cardView() {
   if (s.subscription?.can_save_card) h += `<label class="check"><input type="checkbox" id="k-save" ${cd.save ? 'checked' : ''}> Save this card and charge it automatically for future renewals (cancel any time)</label>`;
   if (s.card?.test_cards?.length) h += `<details><summary class="faint" style="cursor:pointer">Test cards</summary><div class="stack testcards" style="margin-top:8px;gap:6px">${s.card.test_cards.map(t => `<button type="button" data-tcard="${t.number}"><span class="mono">${t.number.replace(/(.{4})/g, '$1 ').trim()}</span><span class="muted">${esc(t.label)}</span></button>`).join('')}</div><p class="faint" style="margin-top:6px">Any future expiry, any CVC. 3DS code: 123456. Real card numbers are refused in sandbox.</p></details>`;
   return h + err() + busyBtn('payCard', `Pay ${fmtCur(s.amount, s.currency)}`);
+}
+function hostedView() {
+  const s = st.s, b = st.bill || {};
+  const f = (id, label, v, extra = '') => `<label class="field"><span>${label}</span><input id="${id}" value="${esc(v || '')}" ${extra}></label>`;
+  return `${err()}<div class="form-grid">${f('h-name', 'Cardholder name', st.name, 'autocomplete="cc-name" required')}${f('h-email', 'Email for receipt', st.email, 'type="email" autocomplete="email" required')}</div>
+    <details ${b.address ? 'open' : ''}><summary class="faint" style="cursor:pointer">Billing address (helps your bank approve the payment)</summary><div class="stack" style="margin-top:8px">${f('h-address', 'Street address', b.address, 'autocomplete="address-line1"')}
+      <div class="form-grid">${f('h-city', 'City', b.city, 'autocomplete="address-level2"')}${f('h-state', 'State / region', b.state, 'autocomplete="address-level1"')}${f('h-zip', 'ZIP / postal code', b.zip, 'autocomplete="postal-code"')}${f('h-country', 'Country', b.country, 'autocomplete="country"')}</div></div></details>
+    <div class="note info"><span>Next you enter your card on <b>Authorize.Net’s secure payment page</b>. Your card number and security code never reach this site.</span></div>
+    ${busyBtn('hostedPay', 'Continue to secure card payment')}`;
+}
+let verifyTimer = null;
+function startVerify() {
+  if (verifyTimer) return;
+  verifyTimer = setTimeout(async () => {
+    verifyTimer = null; st.verifyTries = (st.verifyTries || 0) + 1;
+    try { st.s = await call('GET', '?return=1'); } catch (e) { st.error = e.message; }
+    route(); draw();
+    if (st.step === 'connect' && st.s.payment?.status === 'created') st.error = 'We have not received a result from the card processor yet. If you completed the payment, wait a minute and refresh this page; otherwise try again.';
+  }, st.verifyTries ? 2500 : 300);
 }
 function threeDSView() {
   return `<div class="note info"><span><b>Verify it's you.</b> Your bank asks for a one-time code (sandbox: 123456).</span></div>
@@ -152,10 +189,11 @@ function success() {
   const s = st.s, p = s.payment, c = p?.crypto, url = s.success_url ? s.success_url + (s.success_url.includes('?') ? '&' : '?') + 'session_id=' + encodeURIComponent(s.id) : null;
   if (url && !st.redirecting) { st.redirecting = true; setTimeout(() => { location.href = url; }, 6000); }
   const tx = c?.txs?.filter(t => t.status === 'confirmed') || [];
-  const extra = p?.method === 'card' ? `Charged to your ${esc(p.card?.brand || 'card')}. ${esc(s.merchant.name)} has been notified.` : p?.status === 'overpaid' ? `You sent ${fmt(c.excess, 'USDC')} more than required; ${esc(s.merchant.name)} will refund the difference to your wallet.` : `Verified on ${esc(chain()?.chainName || 'Base')}. ${esc(s.merchant.name)} has been notified.`;
+  const extra = p?.provider === 'authorize_net' && p.status === 'authorized' ? `Your ${esc(p.card?.brand || 'card')} was authorized. ${esc(s.merchant.name)} will capture it when your order is processed.` : p?.method === 'card' ? `Charged to your ${esc(p.card?.brand || 'card')}. ${esc(s.merchant.name)} has been notified.` : p?.status === 'overpaid' ? `You sent ${fmt(c.excess, 'USDC')} more than required; ${esc(s.merchant.name)} will refund the difference to your wallet.` : `Verified on ${esc(chain()?.chainName || 'Base')}. ${esc(s.merchant.name)} has been notified.`;
   return `<div class="thank-you"><div class="thank-you-mark" aria-hidden="true"><span>✓</span></div><h2>Payment received</h2><p class="muted">${extra}</p>
     <div class="thank-you-details"><div><span>Amount</span><b>${p?.method === 'card' ? fmtCur(p.amount, p.currency) : fmt(p?.amount ?? s.amount, 'USDC')}</b></div>
-      ${p?.card ? `<div><span>Card</span><b>${esc(p.card.brand)} •••• ${esc(p.card.last4)}</b></div><div><span>Expires</span><b>${String(p.card.exp_month || '').padStart(2, '0')}/${String(p.card.exp_year || '').slice(-2)}</b></div>${p.card.cardholder ? `<div><span>Cardholder</span><b>${esc(p.card.cardholder)}</b></div>` : ''}<div><span>Authentication</span><b>${esc((p.card.three_ds || '—').replace(/_/g, ' '))}</b></div>` : ''}
+      ${p?.card && p.provider === 'authorize_net' ? `<div><span>Card</span><b>${esc(p.card.brand)} •••• ${esc(p.card.last4)}</b></div>${p.card.cardholder ? `<div><span>Cardholder</span><b>${esc(p.card.cardholder)}</b></div>` : ''}<div><span>Authorization</span><b class="mono">${esc(p.card.auth_code || '—')}</b></div><div><span>Invoice</span><b class="mono">${esc(p.invoice)}</b></div>` : ''}
+      ${p?.card && p.provider !== 'authorize_net' ? `<div><span>Card</span><b>${esc(p.card.brand)} •••• ${esc(p.card.last4)}</b></div><div><span>Expires</span><b>${String(p.card.exp_month || '').padStart(2, '0')}/${String(p.card.exp_year || '').slice(-2)}</b></div>${p.card.cardholder ? `<div><span>Cardholder</span><b>${esc(p.card.cardholder)}</b></div>` : ''}<div><span>Authentication</span><b>${esc((p.card.three_ds || '—').replace(/_/g, ' '))}</b></div>` : ''}
       ${c ? `<div><span>From wallet</span><b class="mono">${esc(short(c.payer, 8, 6))}</b></div><div><span>Network</span><b>${esc(chain()?.chainName || c.network)}</b></div>` : ''}
       <div><span>Status</span><b class="paid-status">${esc((p?.status || 'paid').replace(/_/g, ' '))}</b></div>
       ${tx.map(t => `<div><span>Transaction</span><b><a class="mono" href="${esc(t.url)}" target="_blank" rel="noopener">${esc(short(t.hash, 10, 8))}</a></b></div>`).join('')}
@@ -246,6 +284,19 @@ function mount() {
     const r = await call('POST', '/card', { name: st.name, email: st.email, number: st.card.number, exp: st.card.exp, cvc, save_card: st.card.save });
     st.s.payment = r; await afterCard(r);
   }); });
+  on('#hostedPay', () => {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    st.name = v('h-name'); st.email = v('h-email'); st.bill = { address: v('h-address'), city: v('h-city'), state: v('h-state'), zip: v('h-zip'), country: v('h-country') };
+    act('hostedPay', 'Opening secure payment page…', async () => {
+      if (st.name.length < 2) throw new Error('Enter the cardholder name.');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(st.email)) throw new Error('Enter a valid email address for your receipt.');
+      const r = await call('POST', '/anet/start', { name: st.name, email: st.email, ...st.bill });
+      const form = document.createElement('form'); form.method = 'POST'; form.action = r.form.action; form.style.display = 'none';
+      const t = document.createElement('input'); t.type = 'hidden'; t.name = 'token'; t.value = r.form.token; form.appendChild(t);
+      document.body.appendChild(form); st.busyText = 'Redirecting…'; form.submit();
+      await new Promise(() => {}); // keep the button busy while the browser navigates
+    });
+  });
   on('#otpGo', () => { const code = $('#otp').value; act('otpGo', 'Verifying…', async () => { const r = await call('POST', `/payments/${st.s.payment.id}/3ds`, { code }); st.s.payment = r; await afterCard(r); }); });
   on('#otpCancel', () => act('otpCancel', 'Cancelling…', async () => { const r = await call('POST', `/payments/${st.s.payment.id}/3ds`, { code: 'cancel' }); st.s.payment = r; await afterCard(r); }));
 }

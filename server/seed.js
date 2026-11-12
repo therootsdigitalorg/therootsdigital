@@ -12,7 +12,7 @@ const core = require('./core');
 const genPassword = () => U.rid(6, 'ABCDEFGHJKLMNPQRSTUVWXYZ') + '-' + U.rid(6, 'abcdefghjkmnpqrstuvwxyz') + '-' + U.rid(4, '23456789');
 
 async function ensureSeed() {
-  if (store.list('users', {}, { limit: 1 }).length) return;
+  if (store.list('users', {}, { limit: 1 }).length) { require('./business').ensure(); return; }
   const auth = require('./auth');
   const notes = [];
   if (config.production && !config.adminPassword) throw new U.HttpError(503, 'setup_incomplete', 'Server setup incomplete. Add ADMIN_PASSWORD in Vercel to create the first super admin.');
@@ -20,7 +20,7 @@ async function ensureSeed() {
   auth.createUser({ email: config.adminEmail, name: 'Platform Owner', password: adminPassword, kind: 'staff', role: 'super_admin' });
   notes.push(`Super admin   ${config.adminEmail}   password: ${config.adminPassword ? '(from ADMIN_PASSWORD)' : adminPassword}`);
 
-  if (config.seedDemo) {
+  if (config.seedDemo && config.multiMerchant) {
     const { issueKey, ensurePublishable } = require('./routes/merchant');
     const m = core.newMerchant({ name: 'Northwind Apparel Co.', legal_name: 'Northwind Apparel Co. LLC', country: 'US', website: 'northwind-apparel.example', support_email: 'help@northwind-apparel.example' });
     Object.assign(m, { status: 'approved', risk: 'low' });
@@ -43,6 +43,7 @@ async function ensureSeed() {
     auth.createUser({ email: 'owner@induscrafts.test', name: 'Hira Baloch', password: genPassword(), kind: 'merchant', role: 'owner', merchant_id: k.id });
   }
   core.audit('system', 'platform.initialized', 'platform', 'First-run setup');
+  require('./business').ensure();
   const text = `Digital Hub — first-run credentials (${new Date().toISOString()})\n\n${notes.join('\n')}\n\nChange these passwords after signing in. Delete this file when done.\n`;
   if (!config.production) fs.writeFileSync(path.join(path.dirname(config.dbPath), 'first-run-credentials.txt'), text, { mode: 0o600 });
   if (!config.production) console.log('\n' + text);

@@ -63,10 +63,19 @@ module.exports = {
   secureCookies: publicUrl.startsWith('https://'),
   binance: { base: env('BINANCE_PAY_BASE', 'https://bpay.binanceapi.com'), apiKey: env('BINANCE_PAY_API_KEY'), secretKey: env('BINANCE_PAY_SECRET_KEY'), publicKey: env('BINANCE_PAY_PUBLIC_KEY').replace(/\\n/g, '\n') },
   coinbase: { base: env('COINBASE_API_BASE', 'https://api.commerce.coinbase.com'), apiKey: env('COINBASE_API_KEY'), webhookSecret: env('COINBASE_WEBHOOK_SECRET') },
+  // Single-business platform (default). MULTI_MERCHANT=1 restores the retired multi-merchant platform unchanged (reversible).
+  multiMerchant: flag('MULTI_MERCHANT', false),
+  productName: 'DIGITAL HUB — Card Payments & Crypto Settlement',
+  /* Authorize.Net (official endpoints; overridable only for local tests) */
+  anet: {
+    sandbox: { api: env('ANET_SANDBOX_API_URL', 'https://apitest.authorize.net/xml/v1/request.api'), hosted: env('ANET_SANDBOX_HOSTED_URL', 'https://test.authorize.net/payment/payment'), rest: env('ANET_SANDBOX_REST_URL', 'https://apitest.authorize.net/rest/v1') },
+    production: { api: env('ANET_PRODUCTION_API_URL', 'https://api.authorize.net/xml/v1/request.api'), hosted: env('ANET_PRODUCTION_HOSTED_URL', 'https://accept.authorize.net/payment/payment'), rest: env('ANET_PRODUCTION_REST_URL', 'https://api.authorize.net/rest/v1') },
+  },
 };
 
 Object.defineProperty(module.exports, 'requireStaffMfa', { enumerable: true, get() {
   if (staffMfaEnv !== undefined && staffMfaEnv !== '') return flag('REQUIRE_STAFF_MFA', false);
+  if (!module.exports.multiMerchant) return true; // single-business platform: 2FA is mandatory for the Super Admin
   try { return !!require('./core').platform().staffMfa; } catch { return false; }
 } });
-Object.defineProperty(module.exports, 'staffMfaSource', { get: () => staffMfaEnv !== undefined && staffMfaEnv !== '' ? 'environment (REQUIRE_STAFF_MFA)' : 'Super Admin setting' });
+Object.defineProperty(module.exports, 'staffMfaSource', { get: () => staffMfaEnv !== undefined && staffMfaEnv !== '' ? 'environment (REQUIRE_STAFF_MFA)' : module.exports.multiMerchant ? 'Super Admin setting' : 'mandatory (single-business platform)' });

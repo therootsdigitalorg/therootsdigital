@@ -1,7 +1,7 @@
 {
   "name": "digital-hub-payments",
-  "version": "2.0.0",
-  "description": "Digital Hub — multi-merchant MetaMask USDC gateway on Base (non-custodial) with Super Admin console, merchant dashboard, hosted checkout, REST API, WooCommerce plugin and double-entry ledger.",
+  "version": "3.0.0",
+  "description": "DIGITAL HUB — Card Payments & Crypto Settlement: single-business Authorize.Net card platform with USD settlement reconciliation, verified USDC payouts to the admin MetaMask wallet on Base, WooCommerce plugin and double-entry ledger.",
   "private": true,
   "main": "server/index.js",
   "engines": {
@@ -11,11 +11,15 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "reset": "node server/reset.js",
-    "test": "node test/smoke.js",
-    "test:ui": "node test/ui.js",
+    "test": "node test/console.js",
+    "test:ui": "node test/ui-console.js",
     "test:sepolia": "node test/live-sepolia.js",
-    "test:all": "node test/smoke.js && node test/ui.js && node test/live-sepolia.js",
-    "build:mm": "node build/mm-connect.mjs"
+    "test:all": "node test/console.js && node test/ui-console.js && node test/smoke.js && node test/ui.js",
+    "build:mm": "node build/mm-connect.mjs",
+    "backup": "node scripts/backup.js",
+    "test:legacy": "node test/smoke.js",
+    "test:ui:legacy": "node test/ui.js",
+    "check": "node scripts/check.js"
   },
   "license": "UNLICENSED",
   "dependencies": {

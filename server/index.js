@@ -19,18 +19,23 @@ function route(method, pattern, handler) {
 }
 require('./auth').routes(route);
 require('./routes/api').routes(route);
-require('./routes/merchant').routes(route);
+if (config.multiMerchant) require('./routes/merchant').routes(route); // merchant dashboards exist only on the multi-merchant platform
 require('./routes/admin').routes(route);
+require('./routes/console').routes(route);
 require('./routes/checkout').routes(route);
 require('./routes/supabase').routes(route);
 
+/* Single-business platform: Super Admin keeps only these legacy /a-api areas (the rest manage retired merchants). */
+const A_API_SINGLE = /^\/a-api\/(chain|diagnostics|staff|audit|deliveries|alerts|ledger|api-logs|counts|platform)(\/|$)/;
 const PUBLIC = path.join(config.ROOT, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.md': 'text/markdown; charset=utf-8' };
 /* MetaMask Connect (@metamask/connect-evm) is self-hosted under /vendor/mm-connect; it talks to MetaMask's relay and
    analytics hosts (*.metamask.io). Extra hosts can be appended with METAMASK_CONNECT_CSP. No third-party script CDN. */
 const MM_CONNECT = "https://*.metamask.io wss://*.metamask.io " + String(process.env.METAMASK_CONNECT_CSP || '').trim();
+/* Accept Hosted: the checkout page form-POSTs the payment token to Authorize.Net's hosted payment page. */
+const ANET_HOSTED = [...new Set(Object.values(config.anet).map(e => new URL(e.hosted).origin))].join(' ');
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': `default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.metamask.io; connect-src 'self' ${MM_CONNECT}; frame-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`.replace(/\s+;/g, ';'),
+  'Content-Security-Policy': `default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: blob: https://*.metamask.io; connect-src 'self' ${MM_CONNECT}; frame-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' ${ANET_HOSTED}`.replace(/\s+;/g, ';'),
   'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
   ...(config.secureCookies ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
@@ -80,13 +85,13 @@ const errorResult = (e, headers = {}) => {
 };
 
 /* API logs: every /v1 call, inbound provider hook and customer-checkout write (status polls are skipped). */
-const LOGGED = /^\/(v1|sb-api|hooks)\//;
+const LOGGED = /^\/(v1|sb-api|hooks|api\/v1\/(woocommerce|webhooks))\//;
 function logApi(ctx, status, ms, err) {
   if (!LOGGED.test(ctx.path) && !(ctx.path.startsWith('/c-api/') && ctx.method !== 'GET')) return;
   try {
     let mid = ctx.auth?.merchant_id || null;
     const cs = ctx.path.match(/^\/c-api\/sessions\/(cs_[A-Za-z0-9]+)/); if (!mid && cs) mid = store.get('checkout_sessions', cs[1])?.merchant_id || null;
-    store.put('api_logs', { id: U.id('log'), merchant_id: mid, mode: ctx.auth?.mode || null, status: status >= 400 ? 'error' : 'ok', kind: ctx.path.startsWith('/v1/') ? 'api' : ctx.path.startsWith('/sb-api/') ? 'supabase' : ctx.path.startsWith('/hooks/') ? 'webhook_in' : 'checkout',
+    store.put('api_logs', { id: U.id('log'), merchant_id: mid, mode: ctx.auth?.mode || null, status: status >= 400 ? 'error' : 'ok', kind: /^\/(v1|api\/v1\/woocommerce)\//.test(ctx.path) ? 'api' : ctx.path.startsWith('/sb-api/') ? 'supabase' : /^\/(hooks|api\/v1\/webhooks)\//.test(ctx.path) ? 'webhook_in' : 'checkout',
       method: ctx.method, path: ctx.path.replace(/(cs|pay|re|stl)_[A-Za-z0-9]+/g, '$1_…'), full_path: ctx.path, code: status, ms, ip: ctx.ip, key: ctx.auth?.key || null,
       idempotency_key: U.str(ctx.headers['idempotency-key'], 80) || null, error: err || null, ua: U.str(ctx.headers['user-agent'], 120) });
   } catch (e) { console.error('[api-log]', e.message); }
@@ -98,7 +103,8 @@ async function runRoute(req, match, ctx, pathname, cookiesOut) {
 }
 async function runRouteInner(req, match, ctx, pathname, cookiesOut, extraHeaders) {
   try {
-    if (/^\/(auth|m-api|a-api)\//.test(pathname) && req.method !== 'GET' && req.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
+    if (!config.multiMerchant && pathname.startsWith('/a-api/') && !A_API_SINGLE.test(pathname)) throw new HttpError(404, 'retired', 'This area belongs to the retired multi-merchant platform (set MULTI_MERCHANT=1 to restore it).');
+    if (/^\/(auth|m-api|a-api|api\/v1\/admin)\//.test(pathname) && req.method !== 'GET' && req.headers['x-requested-with'] !== 'DigitalHub') throw new HttpError(403, 'csrf', 'Missing request header.');
     const out = await match.handler(ctx);
     if (cookiesOut.length) extraHeaders['Set-Cookie'] = cookiesOut;
     if (out?.file) return { file: out.file, type: out.type };
@@ -185,22 +191,32 @@ const server = http.createServer(handler);
 /* Serverless has no timers between requests: background work runs after requests, at most every 20s
    per instance, plus the daily Vercel cron as a fallback when the site is idle. */
 let lastJobs = 0;
-const dbJobs = async () => { core.runExpiry(); core.runSettlement('test'); core.runSettlement('live'); require('./subscriptions').run(); };
+const dbJobs = async () => { core.runExpiry(); if (config.multiMerchant) { core.runSettlement('test'); core.runSettlement('live'); } require('./subscriptions').run(); };
 /** Run a DB step safely: on Postgres every step takes the global lock + its own transaction; RPC calls happen between steps. */
 const db = fn => store.usePg ? serial(() => store.requestTx(async () => fn())) : Promise.resolve().then(fn);
 const runDbJobs = () => db(dbJobs);
+/** Safety net for missed webhooks: look up recent hosted-page payments that have no result yet (server-side API lookups only). */
+async function cardSweep() {
+  if (config.multiMerchant) return;
+  const cards = require('./cards'), since = Date.now() - 3 * 3600000;
+  const open = await db(() => store.list('payments', { status: ['created', 'pending'], since }, { limit: 50 }).filter(p => p.provider === 'authorize_net'));
+  for (const p of open.slice(0, 20)) await db(() => cards.reconcile(store.get('payments', p.id))).catch(e => console.error('[card-sweep]', e.message));
+}
 const monitor = () => usdc.tickAll({ db });
 function pruneLogs() { return db(() => { store.prune('api_logs', Date.now() - 30 * U.DAY); store.prune('sessions', Date.now() - 30 * U.DAY); }); }
 function scheduleJobs() {
   if (!config.serverless || Date.now() - lastJobs < 20000) return;
   lastJobs = Date.now();
-  const work = runDbJobs().then(() => monitor()).then(() => core.runDeliveries()).catch(e => console.error('[job]', e.message));
+  const work = runDbJobs().then(() => monitor()).then(() => cardSweep()).then(() => core.runDeliveries()).catch(e => console.error('[job]', e.message));
   require('@vercel/functions').waitUntil(work);
 }
 route('GET', '/api/cron', async ctx => {
   if (!config.cronSecret || !U.safeEqual(ctx.headers.authorization || '', 'Bearer ' + config.cronSecret)) throw new HttpError(401, 'unauthorized', 'Invalid cron secret.');
   await dbJobs();
   await usdc.tickAll();
+  await cardSweep();
+  const AN = require('./authorizenet');
+  if (!config.multiMerchant) for (const mode of ['test', 'live']) if (AN.configured(AN.envForMode(mode))) await require('./settlement').syncBatches(mode, 'cron').catch(e => console.error('[settlement-sync]', mode, e.message));
   await core.runDeliveries();
   store.prune('api_logs', Date.now() - 30 * U.DAY);
   return { ok: true, monitor: usdc.status };
@@ -217,6 +233,7 @@ async function start() {
     setInterval(safe(() => db(() => require('./subscriptions').run())), 30000),
     setInterval(safe(() => db(() => { core.runSettlement('test'); core.runSettlement('live'); })), 60000),
     setInterval(safe(pruneLogs), 6 * 3600000),
+    setInterval(safe(cardSweep), 60000),
   ];
   // New block on a WebSocket subscription → check that network right away (throttled to one tick per 2 s).
   const lastHeadTick = {};
@@ -230,7 +247,7 @@ async function start() {
     process.exit(1);
   });
   server.listen(config.port, () => {
-    console.log(`\n  Digital Hub running at ${config.publicUrl}`);
+    console.log(`\n  ${config.multiMerchant ? 'Digital Hub (multi-merchant)' : config.productName} running at ${config.publicUrl}`);
     console.log(`  Dashboard: ${config.publicUrl}/app   ·   API base: ${config.publicUrl}/v1`);
     console.log(`  Live payments: ${config.livePayments ? 'ON' : 'off (sandbox only)'}\n`);
   });

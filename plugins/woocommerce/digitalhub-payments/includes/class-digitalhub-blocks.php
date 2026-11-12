@@ -34,7 +34,7 @@ final class DigitalHub_Blocks_Integration extends AbstractPaymentMethodType
     public function get_payment_method_data()
     {
         return [
-            'title'       => isset($this->settings['title']) ? $this->settings['title'] : 'Card or Digital Wallet (USD)',
+            'title'       => isset($this->settings['title']) ? $this->settings['title'] : 'Credit / Debit Card',
             'description' => isset($this->settings['description']) ? $this->settings['description'] : '',
             'supports'    => ['products', 'refunds'],
         ];

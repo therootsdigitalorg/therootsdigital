@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name:       Digital Hub Payments for WooCommerce
- * Description:       Accept card and digital-wallet payments in USD through the Digital Hub hosted checkout.
- * Version:           2.1.0
+ * Plugin Name:       Digital Hub Payments
+ * Description:       Accept card payments in USD through Digital Hub (Authorize.Net secure hosted payment page). Card data never touches your store or Digital Hub.
+ * Version:           3.0.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('DIGITALHUB_WC_VERSION', '2.1.0');
+define('DIGITALHUB_WC_VERSION', '3.0.0');
 define('DIGITALHUB_WC_FILE', __FILE__);
 
 add_action('before_woocommerce_init', function () {
@@ -31,32 +31,31 @@ add_action('plugins_loaded', function () {
     }
 
     /**
-     * Card or digital-wallet payment in USD. The order is marked paid only from Digital Hub's signed webhook (or the
-     * return-page status check), and Digital Hub sends that only after the card is authorised or the wallet transfer is verified: chain, token
-     * contract, recipient wallet, sender, amount and confirmations.
+     * Card payment in USD. The customer types the card on Authorize.Net's hosted payment page (via Digital Hub).
+     * The order is marked paid only from Digital Hub's signed webhook (or the server-side status check on the thank-you
+     * page), and Digital Hub sends that only after it has verified the transaction with Authorize.Net server to server.
      */
     class WC_Gateway_DigitalHub extends WC_Payment_Gateway
     {
         const SUPPORTED = ['USD'];
-        const OLD_TITLES = ['Card or USDT / USDC', 'Visa / Mastercard', 'USDC (MetaMask)'];
-        const DEFAULT_TITLE = 'Card or Digital Wallet (USD)';
-        const DEFAULT_DESCRIPTION = 'Pay securely in USD by card or digital wallet.';
+        const DEFAULT_TITLE = 'Credit / Debit Card';
+        const DEFAULT_DESCRIPTION = 'Pay securely by card on our payment processor\'s secure page.';
 
         public function __construct()
         {
             $this->id                 = 'digitalhub';
-            $this->method_title       = 'Digital Hub';
-            $this->method_description = 'Card and digital-wallet payments in USD. Customers pay on the secure Digital Hub hosted checkout. Store currency must be USD.';
+            $this->method_title       = 'Digital Hub Payments';
+            $this->method_description = 'Card payments in USD through Digital Hub. Customers enter their card on the Authorize.Net secure hosted payment page. Store currency must be USD.';
             $this->has_fields         = false;
             $this->supports           = ['products', 'refunds'];
             $this->init_form_fields();
             $this->init_settings();
             $this->title = $this->get_option('title');
-            if (in_array($this->title, self::OLD_TITLES, true) || $this->title === '') {
+            if ($this->title === '' || stripos($this->title, 'USDT') !== false || stripos($this->title, 'wallet') !== false || $this->title === 'Visa / Mastercard') { // titles from older plugin versions
                 $this->title = self::DEFAULT_TITLE;
             }
             $this->description = $this->get_option('description');
-            if (stripos($this->description, 'Mastercard') !== false || stripos($this->description, 'MetaMask') !== false || $this->description === '') {
+            if (stripos($this->description, 'digital wallet') !== false || stripos($this->description, 'Mastercard') !== false || $this->description === '') {
                 $this->description = self::DEFAULT_DESCRIPTION;
             }
             $this->enabled = $this->get_option('enabled');
@@ -69,14 +68,14 @@ add_action('plugins_loaded', function () {
         public function init_form_fields()
         {
             $this->form_fields = [
-                'enabled'         => ['title' => 'Enable', 'type' => 'checkbox', 'label' => 'Enable Digital Hub payments (card and digital wallet, USD)', 'default' => 'no'],
-                'title'           => ['title' => 'Title', 'type' => 'text', 'default' => 'Card or Digital Wallet (USD)'],
-                'description'     => ['title' => 'Description', 'type' => 'textarea', 'default' => 'Pay securely in USD by card or digital wallet.'],
+                'enabled'         => ['title' => 'Enable', 'type' => 'checkbox', 'label' => 'Enable Digital Hub Payments (cards, USD)', 'default' => 'no'],
+                'title'           => ['title' => 'Title', 'type' => 'text', 'default' => self::DEFAULT_TITLE],
+                'description'     => ['title' => 'Description', 'type' => 'textarea', 'default' => self::DEFAULT_DESCRIPTION],
                 'api_base'        => ['title' => 'Digital Hub URL', 'type' => 'text', 'description' => 'For example https://pay.yourdomain.com (no trailing slash).', 'default' => ''],
-                'test_mode'       => ['title' => 'Test mode', 'type' => 'checkbox', 'label' => 'Use the test secret key (test cards, no real money)', 'default' => 'yes'],
-                'test_secret_key' => ['title' => 'Test secret key', 'type' => 'password', 'description' => 'dh_test_sk_… from Developers → API keys'],
-                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (available after go-live)'],
-                'webhook_secret'  => ['title' => 'Webhook signing secret', 'type' => 'password', 'description' => 'Create a webhook endpoint in Digital Hub with URL <code>' . esc_html(home_url('/wc-api/digitalhub/')) . '</code> and paste its whsec_… secret here.'],
+                'test_mode'       => ['title' => 'Test mode', 'type' => 'checkbox', 'label' => 'Use the test secret key (Authorize.Net sandbox, no real money)', 'default' => 'yes'],
+                'test_secret_key' => ['title' => 'Test secret key', 'type' => 'password', 'description' => 'dh_test_sk_… from Digital Hub → WooCommerce Integration → Connect store'],
+                'live_secret_key' => ['title' => 'Live secret key', 'type' => 'password', 'description' => 'dh_live_sk_… (available after Digital Hub enables live card payments)'],
+                'webhook_secret'  => ['title' => 'Webhook signing secret', 'type' => 'password', 'description' => 'Digital Hub → WooCommerce Integration → Connect store creates a webhook to <code>' . esc_html(home_url('/wc-api/digitalhub/')) . '</code>; paste its whsec_… secret here.'],
             ];
         }
 
@@ -105,7 +104,8 @@ add_action('plugins_loaded', function () {
             if ($idempotency_key) {
                 $headers['Idempotency-Key'] = $idempotency_key;
             }
-            $res = wp_remote_request($base . '/v1' . $path, ['method' => $method, 'headers' => $headers, 'timeout' => 30, 'body' => $body ? wp_json_encode($body) : null]);
+            $url = strpos($path, '/api/') === 0 ? $base . $path : $base . '/v1' . $path;
+            $res = wp_remote_request($url, ['method' => $method, 'headers' => $headers, 'timeout' => 30, 'body' => $body ? wp_json_encode($body) : null]);
             if (is_wp_error($res)) {
                 throw new Exception('Could not reach Digital Hub: ' . $res->get_error_message());
             }
@@ -130,12 +130,11 @@ add_action('plugins_loaded', function () {
                     throw new Exception('Digital Hub checkout requires the order to be priced in USD.');
                 }
                 $amount  = self::minor($order->get_total());
-                $session = $this->api('POST', '/checkout/sessions', [
+                $session = $this->api('POST', '/api/v1/woocommerce/checkout', [
                     'amount'          => $amount,
                     'currency'        => $currency,
                     'description'     => sprintf('Order #%s – %s', $order->get_order_number(), get_bloginfo('name')),
-                    // Digital Hub offers only the methods switched on for this account (card = sandbox test cards for now)
-                    'payment_methods' => ['card', 'wallet'],
+                    'payment_methods' => ['card'],
                     'customer_email'  => $order->get_billing_email(),
                     'metadata'        => ['order_id' => (string) $order->get_id(), 'order_key' => $order->get_order_key(), 'site' => home_url()],
                     'success_url'     => $this->get_return_url($order),
@@ -193,21 +192,17 @@ add_action('plugins_loaded', function () {
             }
         }
 
-        /** A transfer was seen on-chain but is not final yet: hold the order, do not mark it paid. */
+        /** Card authorised but not captured yet (authorise-only flow): hold the order, do not mark it paid. */
         private function hold_from_payment($order, $payment)
         {
             if (!$order || $order->is_paid() || $order->get_meta('_digitalhub_session') !== ($payment['checkout_session'] ?? '')) {
                 return;
             }
-            $tx = '';
-            if (!empty($payment['crypto']['transactions'])) {
-                $last = end($payment['crypto']['transactions']);
-                $tx   = isset($last['hash']) ? $last['hash'] : '';
-            }
+            $card = !empty($payment['card']['last4']) ? sprintf(' (%s ending %s)', $payment['card']['brand'], $payment['card']['last4']) : '';
             if ($order->has_status('pending')) {
-                $order->update_status('on-hold', 'Digital Hub: wallet payment received' . ($tx ? ' (' . $tx . ')' : '') . ' — waiting for confirmation.');
+                $order->update_status('on-hold', 'Digital Hub: card authorised' . $card . ', waiting for capture.');
             } else {
-                $order->add_order_note('Digital Hub: wallet payment received' . ($tx ? ' (' . $tx . ')' : '') . '.');
+                $order->add_order_note('Digital Hub: card authorised' . $card . '.');
             }
         }
 
@@ -285,20 +280,22 @@ add_action('plugins_loaded', function () {
             }
             if ($type === 'checkout.session.completed') {
                 $this->complete_from_session($order, $obj);
-            } elseif ($type === 'crypto.payment.detected') {
+            } elseif ($type === 'payment.authorized') {
                 $this->hold_from_payment($order, $obj);
             } elseif ($type === 'checkout.session.expired') {
                 $this->cancel_from_session($order, $obj);
             } elseif ($type === 'payment.refunded') {
                 $this->sync_refund_from_payment($order, $obj);
-            } elseif ($type === 'crypto.payment.underpaid' && $order) {
-                $order->add_order_note('Digital Hub: the customer paid less than due. The order stays unpaid until the rest arrives or you accept the partial payment in Digital Hub.');
+            } elseif ($type === 'payment.failed' && $order && !$order->is_paid()) {
+                $order->add_order_note('Digital Hub: card payment declined' . (!empty($obj['decline_code']) ? ' (' . $obj['decline_code'] . ')' : '') . '. The customer can try again.');
+            } elseif ($type === 'payment.canceled' && $order && !$order->is_paid()) {
+                $order->add_order_note('Digital Hub: card authorisation voided.');
             }
             status_header(200);
             exit('ok');
         }
 
-        /** Fallback if the webhook has not arrived when the customer returns. Digital Hub re-checks the chain on this call. */
+        /** Fallback if the webhook has not arrived when the customer returns. Digital Hub re-checks with Authorize.Net on this call. */
         public function check_on_return($order_id)
         {
             $order = wc_get_order($order_id);
@@ -306,17 +303,16 @@ add_action('plugins_loaded', function () {
                 return;
             }
             try {
-                $this->complete_from_session($order, $this->api('GET', '/checkout/sessions/' . rawurlencode($order->get_meta('_digitalhub_session'))));
+                $status = $this->api('GET', '/api/v1/woocommerce/payment-status?session=' . rawurlencode($order->get_meta('_digitalhub_session')));
+                $this->complete_from_session($order, $status['session']);
             } catch (Exception $e) {
                 $order->add_order_note('Digital Hub status check failed: ' . $e->getMessage());
             }
         }
 
         /**
-         * Card refunds complete immediately. Wallet refunds are non-custodial: Digital Hub cannot move your funds, so this creates
-         * a refund request you send from your receiving wallet (Digital Hub → Refunds); WooCommerce records it automatically when
-         * the transfer is verified on-chain (payment.refunded webhook). Returning an error here prevents WooCommerce from
-         * recording a refund that has not happened yet.
+         * Refunds go through Digital Hub to Authorize.Net: an unsettled payment is voided (full amount only), a settled one is
+         * refunded to the card. WooCommerce records the refund only when Digital Hub reports it succeeded.
          */
         public function process_refund($order_id, $amount = null, $reason = '', $refund_id = 0)
         {
@@ -332,12 +328,11 @@ add_action('plugins_loaded', function () {
                 }
                 $idempotency_key = 'wc_refund_' . $order_id . '_' . (isset($body['amount']) ? $body['amount'] : 'full') . '_' . self::minor($order->get_total_refunded());
                 $refund = $this->api('POST', '/refunds', $body, $idempotency_key);
-                if ($refund['status'] === 'succeeded') { // card refunds complete immediately
-                    $order->add_order_note(sprintf('Digital Hub refund %s: %s USD refunded.', $refund['id'], number_format($refund['amount'] / 100, 2)));
+                if ($refund['status'] === 'succeeded') {
+                    $order->add_order_note(sprintf('Digital Hub %s %s: %s USD.', !empty($refund['voided']) ? 'void' : 'refund', $refund['id'], number_format($refund['amount'] / 100, 2)));
                     return true;
                 }
-                $order->add_order_note(sprintf('Digital Hub refund request %s for %s USD created (status: %s). Send it from your receiving wallet in Digital Hub → Refunds.', $refund['id'], number_format($refund['amount'] / 100, 2), $refund['status']));
-                return new WP_Error('digitalhub_refund_pending', sprintf('Refund request %s created. Open Digital Hub → Refunds and click "Send from wallet". WooCommerce will record the refund automatically once it is confirmed.', $refund['id']));
+                return new WP_Error('digitalhub_refund', sprintf('Refund %s is %s.', $refund['id'], $refund['status']));
             } catch (Exception $e) {
                 return new WP_Error('digitalhub_refund', $e->getMessage());
             }

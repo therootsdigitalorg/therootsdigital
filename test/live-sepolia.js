@@ -11,7 +11,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dh-live-'));
-Object.assign(process.env, { DB_PATH: path.join(tmp, 'live.db'), NODE_ENV: 'test', SEED_DEMO: '0' });
+Object.assign(process.env, { MULTI_MERCHANT: '1', DB_PATH: path.join(tmp, 'live.db'), NODE_ENV: 'test', SEED_DEMO: '0' });
 const C = require('../server/chain');
 const E = require('../server/evm');
 const usdc = require('../server/usdc');

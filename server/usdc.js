@@ -127,9 +127,10 @@ async function checkTransfer(expect, hash, view) {
   const [tx, receipt] = await Promise.all([C.getTx(n.key, hash), C.getReceipt(n.key, hash)]);
   if (!tx && !receipt) return { state: 'not_found', reason: `Transaction not found on ${n.name}.` };
   if (tx?.chainId != null && Number(E.fromHexQty(tx.chainId)) !== n.chainId) return { state: 'rejected', reason: `Transaction was signed for chain ${Number(E.fromHexQty(tx.chainId))}, not ${n.name} (${n.chainId}).` };
-  const fromSet = expect.from.map(E.lower);
+  const anySender = expect.from == null; // payouts from an exchange / settlement provider: any sender, recipient and amount still verified
+  const fromSet = anySender ? [] : expect.from.map(E.lower);
   if (!receipt) {
-    if (tx && tx.from && !fromSet.includes(E.lower(tx.from)) && E.lower(tx.to) === E.lower(expect.token)) return { state: 'rejected', reason: `Sent from ${E.checksum(tx.from)}, not from the expected wallet.` };
+    if (!anySender && tx && tx.from && !fromSet.includes(E.lower(tx.from)) && E.lower(tx.to) === E.lower(expect.token)) return { state: 'rejected', reason: `Sent from ${E.checksum(tx.from)}, not from the expected wallet.` };
     return { state: 'pending', reason: 'Waiting to be included in a block.' };
   }
   if (receipt.status !== '0x1') return { state: 'rejected', reason: 'The transaction reverted on-chain; no USDC moved.' };
@@ -138,10 +139,10 @@ async function checkTransfer(expect, hash, view) {
   if (!tokenLogs.length) return { state: 'rejected', reason: logs.length ? `Tokens were sent from contract ${E.checksum(logs[0].token)}, which is not the verified USDC contract ${expect.token}.` : 'The transaction contains no USDC transfer.' };
   const toLogs = tokenLogs.filter(l => E.lower(l.to) === E.lower(expect.to));
   if (!toLogs.length) return { state: 'rejected', reason: `USDC went to ${tokenLogs[0].to}, not to the expected wallet ${E.checksum(expect.to)}.` };
-  const mine = toLogs.filter(l => fromSet.includes(E.lower(l.from)));
+  const mine = anySender ? toLogs : toLogs.filter(l => fromSet.includes(E.lower(l.from)));
   if (!mine.length) return { state: 'rejected', reason: `USDC was sent by ${toLogs[0].from}, not by the wallet that authorised this request.` };
   const block = Number(E.fromHexQty(receipt.blockNumber));
-  if (block < expect.startBlock) return { state: 'rejected', reason: `The transfer (block ${block}) was made before this request was created (block ${expect.startBlock}).` };
+  if (block < (expect.startBlock || 0)) return { state: 'rejected', reason: `The transfer (block ${block}) was made before this request was created (block ${expect.startBlock}).` };
   const value = mine.reduce((s, l) => s + BigInt(l.value), 0n).toString();
   const confirmations = Math.max(0, view.head - block + 1);
   const final = confirmations >= n.confirmations && block <= view.final;
@@ -317,6 +318,7 @@ function acceptPartial(p, actor) {
 /* ---- refresh one payment from the chain (used by checkout polling, merchant view and the monitor) ---- */
 const lastRefresh = new Map();
 async function refreshPayment(p, { force = false, view } = {}) {
+  if (p?.provider === 'authorize_net') return ['created', 'pending', 'authorized'].includes(p.status) ? require('./cards').reconcile(p, { force }).catch(() => p) : p; // server-side Authorize.Net lookup
   if (!p || p.method !== 'usdc') return p;
   const watch = [...ACTIVE, 'expired'].includes(p.status) && now() - p.created_at < LATE_WINDOW + DAY;
   if (!watch) return p;
@@ -587,4 +589,4 @@ function reconChecks(mode) {
 
 module.exports = { walletUsable, receivingWallet, publicWallet, addWallet, walletChallenge, verifyWalletSignature, setReceiving, removeWallet, reviewWallet,
   checkTransfer, chainView, checkoutChallenge, startPayment, cancelAwaiting, submitPaymentTx, refreshPayment, acceptPartial, refundable, createRefund, refundAction, submitRefundTx,
-  cancelRefund, refreshRefund, publicRefund, feeDue, createSettlement, submitSettlementTx, refreshSettlement, voidSettlement, tick, tickAll, status, directBalances, reconChecks, ACTIVE, isTxHash };
+  cancelRefund, refreshRefund, publicRefund, feeDue, createSettlement, submitSettlementTx, refreshSettlement, voidSettlement, tick, tickAll, status, directBalances, reconChecks, ACTIVE, isTxHash, bindTx, releaseTx };

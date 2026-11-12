@@ -13,6 +13,7 @@ const P = require('../providers');
 const { HttpError, bad } = U;
 
 const usdc = require('../usdc');
+const cards = require('../cards');
 const C = require('../chain');
 const E = require('../evm');
 
@@ -25,14 +26,16 @@ function view(s) {
     methods, cancel_url: s.cancel_url, success_url: s.success_url, customer_email: s.customer_email, expires_at: s.expires_at,
     usdc: methods.includes('usdc') ? { chain: C.walletParams(key), recipient: w.address, amount_units: E.centsToUnits(s.amount), confirmations: C.net(key).confirmations, finality: C.net(key).finality,
       quote_minutes: C.net(key).quoteMinutes, explorer: C.NETWORKS[key].explorer } : null,
-    card: methods.includes('card') ? { sandbox: s.mode === 'test', test_cards: s.mode === 'test' ? Object.entries(P.TEST_CARDS).map(([number, c]) => ({ number, brand: c.brand, country: c.country, label: c.label })) : [] } : null,
+    card: methods.includes('card') && !config.multiMerchant ? { provider: 'authorize_net', hosted: true, sandbox: s.mode === 'test', test_cards: [] }
+      : methods.includes('card') ? { sandbox: s.mode === 'test', test_cards: s.mode === 'test' ? Object.entries(P.TEST_CARDS).map(([number, c]) => ({ number, brand: c.brand, country: c.country, label: c.label })) : [] } : null,
     subscription: s.metadata?.subscription_id ? (() => { const sub = store.get('subscriptions', s.metadata.subscription_id); return sub ? { interval: sub.interval, interval_count: sub.interval_count, can_save_card: s.mode === 'test' && methods.includes('card') } : null; })() : null,
     payment: p ? paymentView(p) : null,
   };
 }
 function paymentView(p) {
   const base = { id: p.id, status: p.status, method: p.method, amount: p.amount, currency: p.currency, created: Math.floor(p.created_at / 1000), decline: p.status === 'declined' ? p.events.at(-1).note : null,
-    card: p.card ? { brand: p.card.brand, last4: p.card.last4, exp_month: p.card.exp_month || null, exp_year: p.card.exp_year || null, cardholder: p.card.holder || null, three_ds: p.card.threeDS?.result || null } : null };
+    card: p.card ? { brand: p.card.brand, last4: p.card.last4, exp_month: p.card.exp_month || null, exp_year: p.card.exp_year || null, cardholder: p.card.holder || null, three_ds: p.card.threeDS?.result || null, auth_code: p.card.authCode || null } : null,
+    ...(p.provider === 'authorize_net' ? { provider: 'authorize_net', invoice: p.anet.invoice, trans_id: p.anet.transId || null, customer: { name: p.customer?.name, email: p.customer?.email } } : {}) };
   const c = p.crypto;
   if (!c) return { ...base, crypto: null };
   if (p.method !== 'usdc') return { ...base, crypto: { provider: c.provider, asset: c.asset, network: c.network, network_label: P.NETWORKS[c.network]?.label, address: c.address || null, amount_due: c.quoteAmount, received: c.received, confirmations: c.confirmations, required: c.required, expires_at: c.expiresAt, excess: c.excess } };
@@ -73,7 +76,15 @@ function routes(r) {
     return { redirect: `/pay/${s.id}` };
   });
 
-  r('GET', '/c-api/sessions/:id', async ctx => { const s = sessionFor(ctx.params.id); if (s.payment_id) await usdc.refreshPayment(store.get('payments', s.payment_id)); return view(store.get('checkout_sessions', s.id)); });
+  r('GET', '/c-api/sessions/:id', async ctx => {
+    const s = sessionFor(ctx.params.id), p = s.payment_id ? store.get('payments', s.payment_id) : null;
+    // Back from the hosted page: the redirect itself proves nothing, so ask Authorize.Net (server to server) what happened.
+    if (p?.provider === 'authorize_net') { if (['created', 'pending', 'authorized'].includes(p.status)) await cards.reconcile(p, { force: ctx.query.return === '1' }).catch(e => console.error('[card-return]', e.message)); }
+    else if (p) await usdc.refreshPayment(p);
+    return view(store.get('checkout_sessions', s.id));
+  });
+  /* ---- Authorize.Net Accept Hosted: customer details → hosted-page token (card data is typed on Authorize.Net only) ---- */
+  r('POST', '/c-api/sessions/:id/anet/start', async ctx => { throttle(ctx.ip, 20); const out = await cards.start(sessionFor(ctx.params.id), ctx.body); return { form: out.form, payment: paymentView(out.payment) }; });
   r('POST', '/c-api/sessions/:id/card', ctx => paymentView(core.cardPay(sessionFor(ctx.params.id), ctx.body)));
   r('POST', '/c-api/sessions/:id/crypto', async ctx => paymentView(await core.cryptoStart(sessionFor(ctx.params.id), ctx.body)));
   r('POST', '/c-api/sessions/:id/payments/:pid/3ds', ctx => paymentView(core.complete3DS(paymentFor(ctx.params.pid, ctx.params.id), ctx.body.code)));
@@ -106,6 +117,13 @@ function routes(r) {
   });
 
   /* ---- inbound provider webhooks (raw body verified before parsing) ---- */
+  r('POST', '/hooks/authorize-net', ctx => cards.webhook(ctx));
+  r('POST', '/api/v1/webhooks/authorize-net', ctx => cards.webhook(ctx));
+  /** Mode B placeholder: no settlement provider is integrated, so nothing is accepted here (never trust an unverified event). */
+  r('POST', '/api/v1/webhooks/settlement-provider', ctx => {
+    store.put('provider_events', { id: U.id('pev'), k: `settlement:refused:${U.rid(12)}`, status: 'rejected', provider: 'settlement_provider', type: 'not_integrated', sig: 'not checked', ip: ctx.ip });
+    throw new HttpError(501, 'not_integrated', 'No settlement provider is integrated. Events are not accepted.');
+  });
   r('POST', '/hooks/binance-pay', ctx => {
     if (!P.BinancePay.verifyWebhook(ctx.headers, ctx.raw)) { store.put('provider_events', { id: U.id('pev'), k: `binance:rejected:${U.rid(12)}`, status: 'rejected', provider: 'binance', type: 'unverified', sig: 'invalid', ip: ctx.ip }); throw new HttpError(400, 'invalid_signature', 'Signature verification failed'); }
     const e = P.BinancePay.parseWebhook(JSON.parse(ctx.raw));

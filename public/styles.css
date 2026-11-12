@@ -1,34 +1,27 @@
-/* Layout: app shell — top role bar, left module rail (collapses to a drawer on phones), working canvas.
-   Digital Hub identity from the blueprint deck: deep navy ground, teal signal, amber caution. Dark-first. */
+/* Layout: app shell — top bar, left module rail (collapses to a drawer on phones), working canvas.
+   DIGITAL HUB identity: black / charcoal ground, electric-blue signal with a purple second accent, amber caution. Dark-first. */
 :root{
-  --bg:#0C172A; --surface:#16253B; --surface-2:#1B2D46; --line:#2B3F57; --line-strong:#394E63;
-  --fg:#F5F9FC; --muted:#A8BBCB; --faint:#7F94A8;
-  --accent:#25D3B1; --accent-ink:#04261F; --accent-soft:rgba(37,211,177,.13);
+  --bg:#07080B; --surface:#111318; --surface-2:#171A21; --line:#252A34; --line-strong:#323946;
+  --fg:#F3F5F9; --muted:#A4ACBC; --faint:#7C8597;
+  --accent:#4F7CFF; --accent-ink:#FFFFFF; --accent-soft:rgba(79,124,255,.14);
+  --accent-2:#8B5CF6; --accent-2-soft:rgba(139,92,246,.16); --grad:linear-gradient(135deg,#4F7CFF 0%,#8B5CF6 100%);
   --warn:#FFC25E; --warn-soft:rgba(255,194,94,.14);
   --danger:#FF7D88; --danger-soft:rgba(255,125,136,.14);
-  --info:#83BDFF; --info-soft:rgba(131,189,255,.14);
-  --ok:#5BDB95; --ok-soft:rgba(91,219,149,.14);
-  --neutral-soft:rgba(168,187,203,.14);
-  --shadow:0 18px 50px rgba(2,8,20,.55);
+  --info:#9DB4FF; --info-soft:rgba(120,150,255,.14);
+  --ok:#4ADE9B; --ok-soft:rgba(74,222,155,.13);
+  --neutral-soft:rgba(164,172,188,.13);
+  --shadow:0 18px 50px rgba(0,0,0,.6);
   --font-ui:"Aptos","Manrope",system-ui,-apple-system,"Segoe UI",sans-serif;
   --font-mono:"JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
   --r-sm:6px; --r-md:10px; --r-lg:14px;
   color-scheme:dark;
 }
-@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
-  --bg:#F2F6FA; --surface:#FFFFFF; --surface-2:#EAF0F6; --line:#D6E0EA; --line-strong:#B9C8D6;
-  --fg:#0C172A; --muted:#45596E; --faint:#5F7387;
-  --accent:#0B8F77; --accent-ink:#FFFFFF; --accent-soft:rgba(11,143,119,.10);
-  --warn:#8A5A00; --warn-soft:rgba(214,150,30,.16);
-  --danger:#B42334; --danger-soft:rgba(180,35,52,.09);
-  --info:#1F5FB8; --info-soft:rgba(31,95,184,.09);
-  --ok:#17784A; --ok-soft:rgba(23,120,74,.10);
-  --neutral-soft:rgba(69,89,110,.09);
-  --shadow:0 18px 50px rgba(12,23,42,.16); color-scheme:light }}
+/* Dark is the default (premium dark console); light is opt-in with the Theme button. */
 :root[data-theme="light"]{
   --bg:#F2F6FA; --surface:#FFFFFF; --surface-2:#EAF0F6; --line:#D6E0EA; --line-strong:#B9C8D6;
   --fg:#0C172A; --muted:#45596E; --faint:#5F7387;
-  --accent:#0B8F77; --accent-ink:#FFFFFF; --accent-soft:rgba(11,143,119,.10);
+  --accent:#3457E0; --accent-ink:#FFFFFF; --accent-soft:rgba(52,87,224,.10);
+  --accent-2:#7C3AED; --accent-2-soft:rgba(124,58,237,.10); --grad:linear-gradient(135deg,#3457E0 0%,#7C3AED 100%);
   --warn:#8A5A00; --warn-soft:rgba(214,150,30,.16);
   --danger:#B42334; --danger-soft:rgba(180,35,52,.09);
   --info:#1F5FB8; --info-soft:rgba(31,95,184,.09);
@@ -58,7 +51,7 @@ p{margin:0}
   display:flex;align-items:center;gap:14px;min-height:58px;padding-block:8px;
   padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.04em;white-space:nowrap}
-.brand-mark{width:6px;height:28px;border-radius:2px;background:var(--accent)}
+.brand-mark{width:8px;height:28px;border-radius:3px;background:var(--grad);box-shadow:0 0 18px rgba(79,124,255,.45)}
 .brand small{display:block;font-size:.66rem;font-weight:600;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
 .roles{display:flex;background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
 .roles button{border:0;background:none;padding:6px 12px;border-radius:999px;cursor:pointer;color:var(--muted);font-weight:600;font-size:.85rem;white-space:nowrap}
@@ -99,7 +92,7 @@ main{min-width:0;padding-block:22px 60px;padding-left:max(16px,env(safe-area-ins
 
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line-strong);background:var(--surface-2);color:var(--fg);border-radius:8px;padding:8px 14px;font-weight:700;font-size:.86rem;cursor:pointer;white-space:nowrap}
 .btn:hover{border-color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary{background:var(--grad);border-color:transparent;color:var(--accent-ink)}
 .btn.primary:hover{filter:brightness(1.07)}
 .btn.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 45%,transparent);background:var(--danger-soft)}
 .btn.ghost{background:none;border-color:transparent;color:var(--muted)}
@@ -286,3 +279,20 @@ pre.code{background:var(--bg);border:1px solid var(--line);border-radius:8px;pad
 .loading{padding:40px;text-align:center;color:var(--muted)}
 .pager{display:flex;justify-content:space-between;align-items:center;gap:10px}
 @media (max-width:620px){ .onb li{grid-template-columns:26px minmax(0,1fr)} .onb li>:last-child{grid-column:2} .user-chip span{display:none} }
+
+/* ---------- DIGITAL HUB console (single-business) ---------- */
+.kpi.hero{background:linear-gradient(160deg,rgba(79,124,255,.16),rgba(139,92,246,.10) 60%,transparent),var(--surface);border-color:rgba(79,124,255,.35)}
+.status4{display:flex;flex-wrap:wrap;gap:4px}
+.status4 .badge{font-size:.68rem}
+.st-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.st-legend div{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-md);padding:10px 12px}
+.st-legend b{display:block;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-2);margin-bottom:4px}
+.check{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
+.check:last-child{border-bottom:0}
+.check .dot{flex:0 0 10px;height:10px;border-radius:50%;margin-top:6px;background:var(--danger)}
+.check.ok .dot{background:var(--ok)}
+.check.opt .dot{background:var(--warn)}
+.timeline{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+.timeline li{position:relative;padding:0 0 12px 14px}
+.timeline li::before{content:"";position:absolute;left:-6px;top:6px;width:10px;height:10px;border-radius:50%;background:var(--grad)}
+.pill-row{display:flex;flex-wrap:wrap;gap:8px}

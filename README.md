@@ -1,4 +1,135 @@
-# Digital Hub Payments — MetaMask USDC gateway on Base
+# DIGITAL HUB — Card Payments & Crypto Settlement
+
+A **single-business** payment platform. Customers pay by card through **Authorize.Net Accept Hosted**, USD settles to
+the business bank account, and the Super Admin records the USD → USDC conversion and tracks the **USDC payout** into
+their own **MetaMask** wallet on **Base**. The backend verifies the payout on-chain.
+
+* **Card data never touches Digital Hub.** Customers type the card on Authorize.Net's hosted payment page. Digital Hub
+  only ever sees Authorize.Net's masked `XXXX1111`.
+* **No result is trusted from the browser.** A return redirect changes nothing. A payment changes state only after a
+  server-to-server `getTransactionDetails` lookup, or after an Authorize.Net webhook whose `X-ANET-Signature`
+  (HMAC-SHA512 with the Signature Key) verifies and is followed by the same lookup. Invoice number, amount and response
+  code are re-checked every time.
+* **Your keys stay with you.** Digital Hub never asks for or stores a private key or seed phrase. It never signs or
+  sends a transaction. Wallet ownership is proven with a free EIP-4361 signature.
+* **Live is off by default.** Live card payments and live USDC payouts can be switched on only from
+  *Settings → Production readiness*, after every check passes. They also need `LIVE_PAYMENTS=1`.
+
+> The previous **multi-merchant** platform is kept intact behind `MULTI_MERCHANT=1`. See
+> [Multi-merchant platform](#multi-merchant-platform-multi_merchant1). No data was deleted.
+
+## Quick start
+
+Requires **Node.js 22.13+**.
+
+```bash
+npm install
+cp .env.example .env      # optional
+npm start                 # http://localhost:3000/app
+npm test                  # 22 end-to-end checks (fake Authorize.Net + fake Base Sepolia)
+npm run test:ui           # 10 real-browser checks of the console and hosted checkout
+npm run check             # syntax-check every JavaScript file
+npm run backup            # gzipped JSON export of the whole database → data/backups/
+npm run test:legacy       # 63 checks of the multi-merchant platform (MULTI_MERCHANT=1)
+npm run test:ui:legacy    # 14 browser checks of the multi-merchant platform
+```
+
+First start creates the **super admin** from `ADMIN_EMAIL` / `ADMIN_PASSWORD`, plus the single **business record**.
+Sign in at `/app`. **Two-factor authentication is mandatory**: the console stays locked until an authenticator app is set up.
+
+### Setup checklist (sandbox)
+
+1. **Authorize.Net** → *Sandbox* → *Add keys*. Enter the API Login ID, Transaction Key and Signature Key from the
+   sandbox Merchant Interface (*Account → Settings → Security Settings → API Credentials & Keys*), then *Test connection*
+   and *Register webhook*. Keys are sealed with AES-256-GCM and shown only masked.
+2. **WooCommerce Integration** → *Download plugin*. Install **Digital Hub Payments** in WordPress, then *Connect store*
+   and paste the URL, secret key and webhook secret into WooCommerce → Payments → Digital Hub Payments.
+3. **Payment Links** → create a link and pay it with an Authorize.Net sandbox test card (e.g. `4111 1111 1111 1111`).
+4. **Crypto Wallet** → add your MetaMask address and sign the free ownership message.
+5. **Infura & Blockchain** → connect your Infura API key (used to verify USDC payouts on Base).
+
+## Statuses (kept separate on purpose)
+
+| Track | Statuses |
+|---|---|
+| Card | Created · Pending · Authorized · Captured · Declined · Voided · Refunded · Disputed |
+| USD settlement | Pending · Settled · Reconciled · Failed |
+| Conversion | Not requested · Pending · Processing · Completed · Failed |
+| USDC payout | Not initiated · Pending · Submitted · Confirmed · Failed |
+
+## Money flow and settlement modes
+
+1. **Card.** The customer pays on the Authorize.Net hosted page. *Authorize + capture* (default) or *Authorize only*,
+   where the admin captures later. Booked: acquirer receivable ↔ business sales.
+2. **USD settlement.** *Settlements → Sync settled batches* pulls `getSettledBatchList` + `getTransactionList` and matches
+   each transaction to its payment. Transactions not created through Digital Hub are shown as unmatched and booked
+   separately. *Reconcile* each batch with the bank deposit. Any difference needs a note and is booked as processing fees.
+3. **Conversion — Mode A (manual, active).** Record *USD sent* (bank reference) and *USDC obtained*. Every step is in the
+   ledger and the audit log.
+4. **USDC payout.** Create the payout for the exact USDC amount that will arrive, then paste the withdrawal transaction
+   hash. Digital Hub checks the chain ID, Circle's USDC contract, recipient = your verified wallet, the **exact amount**
+   and finality before it marks the payout **Confirmed**. A hash can be used only once.
+5. **Mode B (approved provider such as Bridge or BVNK).** The adapter registry is in `server/settlement-providers.js`.
+   No provider is integrated, so Mode B cannot be switched on and `POST /api/v1/webhooks/settlement-provider` answers
+   `501`. To build an adapter you need a provider agreement, production credentials and that provider's published API
+   reference. No provider endpoint is invented here.
+
+Refunds: an unsettled payment is **voided** (full amount only). A settled one is **refunded** through the API, which
+needs the card's last 4 digits and `XXXX` as the expiry. Refunds made in the Authorize.Net Merchant Interface arrive by
+webhook and are booked once. Chargebacks are recorded manually from the processor's notice, because Authorize.Net has no
+dispute webhook.
+
+## Console (Super Admin)
+
+Overview · Card Transactions · Authorize.Net · Customers · Payment Links · WooCommerce Integration · Settlements ·
+Crypto Wallet · Infura & Blockchain · USDC Transfers · Refunds & Disputes · Webhook Logs · Reports & Analytics ·
+Security & Audit Logs · Settings (business profile, **production readiness**, backup & data, platform).
+
+Sensitive changes also ask for a fresh 6-digit code: credentials, wallet approval (plus typing the last 6 characters
+of the address), live switches and adopting a business record. Every write needs the CSRF header, is rate-limited per
+user and is written to the audit log.
+
+## API
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /api/mode` | none | Which platform is running |
+| `/api/v1/admin/...` | admin session + 2FA | Console API (`server/routes/console.js`) |
+| `POST /api/v1/woocommerce/checkout` | secret key | Create a card checkout session (USD) |
+| `GET /api/v1/woocommerce/payment-status?session=…\|order_id=…` | secret / publishable key | Session, payment and the four statuses (re-checked with Authorize.Net) |
+| `POST /api/v1/webhooks/authorize-net` (also `/hooks/authorize-net`) | X-ANET-Signature | Authorize.Net webhooks |
+| `POST /api/v1/webhooks/settlement-provider` | — | `501 not_integrated` (Mode B placeholder) |
+| `/v1/...` | secret key | Existing REST API (checkout sessions, payments, refunds, links, webhooks, events) |
+| `POST /c-api/sessions/:id/anet/start` | session ID | Customer details → Accept Hosted token (rate-limited) |
+
+## Migration from the multi-merchant platform (reversible)
+
+* **Back up first:** run `npm run backup`, or use *Settings → Backup & data → Download backup*. The backup is gzipped JSON
+  with every table, the append-only ledger and settings. Secrets stay encrypted.
+* **Schema 5 is additive.** It adds `customers`, `usd_settlements`, `conversions` and `crypto_payouts`
+  (`supabase/migrations/20261114090000_single_business.sql`). The rollback
+  (`supabase/rollbacks/…down.sql`) only renames those tables, because financial records are never dropped.
+* **Existing data is kept.** Merchant, payment, refund, settlement, webhook and audit records stay as read-only history.
+  Retired merchants cannot sign in or take payments. `MULTI_MERCHANT=1` restores everything.
+* **Already have a WooCommerce store connected?** Use *Settings → Backup & data → Existing store connections → Adopt as
+  business*. The store keeps its API key and webhook, so the plugin doesn't need reinstalling.
+
+## Verification status (be precise)
+
+* Tested end to end against **local fakes**: a fake Authorize.Net JSON API, hosted page and webhooks (`test/fake-anet.js`)
+  and a fake Base node (`test/fake-chain.js`). Requests follow Authorize.Net's published API reference: the JSON API,
+  Accept Hosted, the Transaction Reporting API and the Webhooks REST API.
+* **Not yet verified against the real Authorize.Net sandbox.** That check needs your sandbox credentials: enter them,
+  click *Test connection*, then run a sandbox payment end to end before you rely on it.
+
+---
+
+# Multi-merchant platform (`MULTI_MERCHANT=1`)
+
+The documentation below describes the previous multi-merchant MetaMask USDC gateway. It is still available unchanged
+with `MULTI_MERCHANT=1`. Its test suites are `npm run test:legacy` and `npm run test:ui:legacy`.
+
+## Digital Hub Payments — MetaMask USDC gateway on Base (multi-merchant)
 
 A multi-merchant, **non-custodial** USDC payment gateway. Customers pay with **MetaMask**. USDC moves in one plain
 ERC-20 `transfer` straight from the customer's wallet to the merchant's **signature-verified** wallet. Digital Hub

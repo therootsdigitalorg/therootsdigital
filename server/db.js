@@ -9,8 +9,9 @@ const config = require('./config');
 
 const DOCS = ['merchants', 'users', 'sessions', 'api_keys', 'checkout_sessions', 'payments', 'refunds', 'disputes', 'payouts', 'links', 'wallets', 'banks',
   'webhook_endpoints', 'deliveries', 'events', 'provider_events', 'provider_requests', 'adjustments', 'alerts', 'audit',
-  'merchant_wallets', 'chain_txs', 'settlements', 'api_logs', 'subscriptions', 'documents'];
-const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events', 'chain_txs']); // chain_txs.k = chainId:txHash → replay protection
+  'merchant_wallets', 'chain_txs', 'settlements', 'api_logs', 'subscriptions', 'documents',
+  'customers', 'usd_settlements', 'conversions', 'crypto_payouts']; // single-business platform (schema 5)
+const UNIQUE_K = new Set(['users', 'sessions', 'api_keys', 'links', 'provider_events', 'chain_txs', 'customers', 'usd_settlements']); // chain_txs.k = chainId:txHash → replay protection
 const usePg = !!config.databaseUrl;
 let driver = null;
 /** Opens the database on first use: Postgres when DATABASE_URL is set, otherwise local SQLite. */
@@ -113,4 +114,4 @@ async function requestTx(fn, failed = () => false) {
 function getMeta(key, def) { const r = db.prepare('SELECT value FROM meta WHERE key=?').get(key); return r ? JSON.parse(r.value) : def; }
 function setMeta(key, value) { db.prepare('INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, JSON.stringify(value)); }
 
-module.exports = { db, open, usePg, requestTx, supabaseProfile, put, get, byKey, del, prune, list, count, tx, getMeta, setMeta };
+module.exports = { DOCS, db, open, usePg, requestTx, supabaseProfile, put, get, byKey, del, prune, list, count, tx, getMeta, setMeta };

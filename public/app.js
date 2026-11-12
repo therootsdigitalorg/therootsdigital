@@ -1,6 +1,8 @@
 'use strict';
 /* Digital Hub dashboard — core: helpers, API client, auth screens, shell and router.
-   Merchant views live in app-merchant.js, Super Admin views in app-admin.js. */
+   Single-business platform (default): console views live in app-console.js.
+   Multi-merchant platform (MULTI_MERCHANT=1): merchant views in app-merchant.js, Super Admin views in app-admin.js.
+   App.boot asks the server which platform is running and loads the matching view scripts. */
 
 /* ---------------- helpers ---------------- */
 const $ = (s, el = document) => el.querySelector(s);
@@ -21,11 +23,11 @@ const FIAT = ['USD', 'EUR', 'GBP', 'AED', 'PKR'];
 const EXPLORER = { base_sepolia: 'https://sepolia.basescan.org', base: 'https://basescan.org' };
 
 const TONE = {
-  ok: ['verified_doc', 'settled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
+  ok: ['verified_doc', 'settled', 'reconciled', 'confirmed', 'completed', 'succeeded', 'approved', 'verified', 'delivered', 'won', 'active', 'paid', 'enabled', 'clear', 'resolved', 'pass', 'posted', 'processed', 'complete', 'done', 'yes'],
   accent: ['captured'],
   info: ['authorized', 'confirming', 'processing', 'awaiting_payment', 'under_review', 'created', 'pending_review', 'acknowledged', 'requested', 'submitted', 'open', 'test', 'verifying', 'sandbox', 'tx_submitted', 'tx_discovered', 'detected'],
-  warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid', 'requires_action', 'pending_signature', 'verified', 'attention', 'canceled', 'expired', 'reorg'],
-  danger: ['declined', 'failed', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no', 'not_found', 'tx_rejected', 'void', 'error'],
+  warn: ['pending_approval', 'partially_refunded', 'underpaid', 'overpaid', 'needs_response', 'retrying', 'pending', 'medium', 'expiring', 'pending_execution', 'not_requested', 'unpaid', 'requires_action', 'pending_signature', 'verified', 'attention', 'canceled', 'expired', 'reorg', 'not_initiated', 'held'],
+  danger: ['declined', 'failed', 'voided', 'wrong_network', 'disputed', 'rejected', 'chargeback_lost', 'lost', 'suspended', 'high', 'fail', 'revoked', 'disabled', 'hit', 'live', 'no', 'not_found', 'tx_rejected', 'void', 'error'],
 };
 function badge(status, label) {
   const tone = Object.entries(TONE).find(([, v]) => v.includes(status))?.[0];
@@ -121,13 +123,13 @@ async function openDrawer(fn) {
 }
 async function refreshDrawer() {
   if (!drawerFn || !$('#drawerHost .drawer')) return;
-  try { const { title, body, foot = '' } = await drawerFn(); $('#drTitle').textContent = title; $('#drBody').innerHTML = body; $('#drFoot').innerHTML = foot; $('#drFoot').hidden = !foot; }
-  catch (e) { $('#drBody').innerHTML = note('danger', 'Error', esc(e.message)); }
+  try { const { title, body, foot = '' } = await drawerFn(); if (!$('#drTitle')) return; /* closed while loading */ $('#drTitle').textContent = title; $('#drBody').innerHTML = body; $('#drFoot').innerHTML = foot; $('#drFoot').hidden = !foot; }
+  catch (e) { if ($('#drBody')) $('#drBody').innerHTML = note('danger', 'Error', esc(e.message)); }
 }
 function closeDrawer() { drawerFn = null; $('#drawerHost').innerHTML = ''; }
 
 /* ---------------- app state, actions, forms ---------------- */
-const App = { me: null, mode: lsGet('dh.mode') === 'live' ? 'live' : 'test', tabs: {}, filters: {}, cache: {} };
+const App = { me: null, single: false, product: 'DIGITAL HUB', mode: lsGet('dh.mode') === 'live' ? 'live' : 'test', tabs: {}, filters: {}, cache: {} };
 const VIEWS = {}, MOUNT = {}, ACT = {}, FORM = {}, NAV = {};
 const can = p => App.me?.perms?.includes(p);
 const isStaff = () => App.me?.user?.kind === 'staff';
@@ -171,14 +173,14 @@ ACT.tab = d => { App.tabs[d.group] = d.tab; render(); refreshDrawer(); };
 ACT.go = d => go(d.route);
 ACT.logout = () => run(async () => { await api('POST', '/auth/logout'); App.me = null; location.hash = ''; }, { ok: 'Signed out' });
 ACT.toggleMode = () => { App.mode = App.mode === 'test' ? 'live' : 'test'; lsSet('dh.mode', App.mode); closeDrawer(); render(); };
-ACT.theme = () => { const root = document.documentElement, cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'), next = cur === 'dark' ? 'light' : 'dark'; root.setAttribute('data-theme', next); lsSet('dh.theme', next); };
+ACT.theme = () => { const root = document.documentElement, cur = root.getAttribute('data-theme') || 'dark', next = cur === 'dark' ? 'light' : 'dark'; root.setAttribute('data-theme', next); lsSet('dh.theme', next); };
 ACT.menu = () => $('#rail')?.classList.toggle('open');
 ACT.authView = d => { App.authView = d.view; render(); };
 
 /* ---------------- auth screens ---------------- */
 function authScreen() {
   const v = App.authView || 'login';
-  const brand = `<div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>`;
+  const brand = brandHtml();
   let body = '';
   if (v === 'mfa') body = `<h1>Two-factor verification</h1><p class="muted">Enter the 6-digit code from your authenticator app.</p>
     <form class="stack" data-form="mfaLogin">${field('Code', input('code', { req: true, extra: 'inputmode="numeric" autocomplete="one-time-code" maxlength="6"' }))}<div class="err" id="formErr"></div><button class="btn primary" type="submit">Verify</button></form>`;
@@ -188,6 +190,9 @@ function authScreen() {
     ${field('Website', input('website', { ph: 'yourshop.com' }))}${field('Password', input('password', { type: 'password', req: true, extra: 'autocomplete="new-password" minlength="10"' }), 'At least 10 characters with letters and numbers.')}
     <div class="err" id="formErr"></div><button class="btn primary" type="submit">Create account</button></form>
     <p class="auth-switch">Already have an account? <a data-act="authView" data-view="login">Sign in</a></p>`;
+  else if (App.single) body = `<h1>Administrator sign in</h1><p class="muted">Card payments &amp; crypto settlement console. Two-factor authentication is required.</p>
+    <form class="stack" data-form="login">${field('Email', input('email', { type: 'email', req: true, extra: 'autocomplete="username"' }))}${field('Password', input('password', { type: 'password', req: true, extra: 'autocomplete="current-password"' }))}
+    <div class="err" id="formErr"></div><button class="btn primary" type="submit">Sign in</button></form>`;
   else body = `<h1>Sign in</h1><p class="muted">Merchants and Digital Hub staff use the same sign-in.</p>
     <form class="stack" data-form="login">${field('Email', input('email', { type: 'email', req: true, extra: 'autocomplete="username"' }))}${field('Password', input('password', { type: 'password', req: true, extra: 'autocomplete="current-password"' }))}
     <div class="err" id="formErr"></div><button class="btn primary" type="submit">Sign in</button></form>
@@ -219,14 +224,17 @@ VIEWS.account = async () => {
 };
 
 /* ---------------- shell & router ---------------- */
-function route() { const h = (location.hash || '').replace(/^#\/?/, ''); const [r, ...args] = h.split('/'); return { r: r || (isStaff() ? 'a-overview' : 'home'), args }; }
+const homeRoute = () => App.single ? 'overview' : isStaff() ? 'a-overview' : 'home';
+const navGroups = () => App.single ? NAV.console : isStaff() ? NAV.admin : NAV.merchant;
+function brandHtml() { return App.single ? '<div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Card Payments &amp; Crypto Settlement</small></div></div>' : '<div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>'; }
+function route() { const h = (location.hash || '').replace(/^#\/?/, ''); const [r, ...args] = h.split('/'); return { r: r || homeRoute(), args }; }
 function go(r) { closeDrawer(); location.hash = '#/' + r; }
 function shell() {
   const u = App.me.user, staff = isStaff();
-  const ws = staff ? (App.me.user.role === 'super_admin' ? 'Super admin' : `Staff · ${esc(App.me.role?.label || '')}`) : esc(App.me.merchant?.name || 'Merchant');
-  return `${App.mode === 'test' ? '<div class="test-banner">Test mode · Base Sepolia testnet · test USDC has no value</div>' : ''}
+  const ws = App.single ? (App.me.user.role === 'super_admin' ? 'Super Admin' : esc(App.me.role?.label || 'Staff')) : staff ? (App.me.user.role === 'super_admin' ? 'Super admin' : `Staff · ${esc(App.me.role?.label || '')}`) : esc(App.me.merchant?.name || 'Merchant');
+  return `${App.mode === 'test' ? `<div class="test-banner">${App.single ? 'Test mode · Authorize.Net sandbox · Base Sepolia testnet · no real money moves' : 'Test mode · Base Sepolia testnet · test USDC has no value'}</div>` : ''}
   <header class="topbar"><button class="btn sm menu-btn" data-act="menu" aria-label="Open navigation">☰</button>
-    <div class="brand"><span class="brand-mark"></span><div>DIGITAL HUB<small>Payments · Merchant &amp; Crypto</small></div></div>
+    ${brandHtml()}
     <span class="ws-label">${ws}</span><span class="spacer"></span>
     <button class="mode-switch" role="switch" aria-checked="${App.mode === 'test'}" data-act="toggleMode" title="Switch between test and live data"><span class="knob"></span>Test mode</button>
     <a class="user-chip" href="#/account" title="Your security">${badge(u.mfa_enabled ? 'enabled' : 'pending', u.mfa_enabled ? '2FA' : 'no 2FA')}<span>${esc(u.email)}</span></a>
@@ -234,7 +242,7 @@ function shell() {
   <div class="shell"><nav class="rail" id="rail" aria-label="Modules"></nav><main id="main"></main></div>`;
 }
 function rail(cur) {
-  const groups = isStaff() ? NAV.admin : NAV.merchant, counts = App.counts || {};
+  const groups = navGroups(), counts = App.counts || {};
   return groups.map(([g, items]) => `<div class="navgroup">${esc(g)}</div><div class="nav">${items.map(([r, l]) => `<a href="#/${r}" ${cur === r ? 'aria-current="page"' : ''}>${esc(l)}${counts[r] ? `<span class="count">${counts[r]}</span>` : ''}</a>`).join('')}</div>`).join('')
     + `<div class="navgroup">Account</div><div class="nav"><a href="#/account" ${cur === 'account' ? 'aria-current="page"' : ''}>Your security</a></div>`;
 }
@@ -242,12 +250,13 @@ let renderSeq = 0;
 async function render() {
   const root = $('#root');
   if (!App.me) { root.innerHTML = authScreen(); return; }
+  if (App.single && App.me.config?.requireStaffMfa && !App.me.user.mfa_enabled) { root.innerHTML = mfaGate(); root.dataset.user = ''; return; }
   if (!$('#main') || root.dataset.mode !== App.mode || root.dataset.user !== App.me.user.id) { root.innerHTML = shell(); root.dataset.mode = App.mode; root.dataset.user = App.me.user.id; }
   const { r, args } = route(), seq = ++renderSeq;
-  const valid = (isStaff() ? NAV.admin : NAV.merchant).some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
-  const name = valid ? r : (isStaff() ? 'a-overview' : 'home');
+  const valid = navGroups().some(([, items]) => items.some(([k]) => k === r)) || r === 'account';
+  const name = valid ? r : homeRoute();
   // sidebar badges: light endpoint, fetched in parallel with the page instead of before it
-  if (isStaff()) api('GET', '/a-api/counts').then(o => { App.counts = { 'a-approvals': o.wallets + o.kyb + o.adjustments, 'a-wallet': o.wallets, 'a-risk': o.alerts, 'a-refunds': o.refunds }; if (seq === renderSeq) $('#rail').innerHTML = rail(name); }).catch(() => {});
+  if (isStaff() && !App.single) api('GET', '/a-api/counts').then(o => { App.counts = { 'a-approvals': o.wallets + o.kyb + o.adjustments, 'a-wallet': o.wallets, 'a-risk': o.alerts, 'a-refunds': o.refunds }; if (seq === renderSeq) $('#rail').innerHTML = rail(name); }).catch(() => {});
   $('#rail').innerHTML = rail(name); $('#rail').classList.remove('open');
   const main = $('#main'); if (!main.firstChild) main.innerHTML = '<div class="loading">Loading…</div>';
   clearTimeout(App.refreshTimer); App.live = 0;
@@ -290,4 +299,22 @@ const fInput = (bag, key, label, ph) => field(label, `<input type="text" id="f-$
 const fSelect = (bag, key, label, opts) => field(label, `<select data-filter="${bag}.${key}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(App.filters[bag]?.[key] || '') === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
 const qs = o => '?' + new URLSearchParams(Object.entries(o).filter(([, v]) => v !== '' && v != null)).toString();
 
-App.boot = () => { const t = lsGet('dh.theme'); if (t) document.documentElement.setAttribute('data-theme', t); loadMe().catch(e => { $('#root').innerHTML = `<div class="auth-wrap">${note('danger', 'Cannot reach the server', esc(e.message))}</div>`; }); };
+/** Forced enrollment: on the single-business platform every staff account must turn on 2FA before anything else. */
+function mfaGate() {
+  return `<div class="auth-wrap"><div class="auth-card">${brandHtml()}<h1>Turn on two-factor authentication</h1>
+    <p class="muted">Two-factor authentication is mandatory for every administrator. Scan a QR code with Google Authenticator, Microsoft Authenticator, 1Password or Authy, then enter the 6-digit code.</p>
+    <button class="btn primary" data-act="setupMfa">Set up two-factor authentication</button><button class="btn ghost" data-act="logout">Sign out</button>
+    <span class="faint" style="font-size:.75rem;text-align:center">Signed in as ${esc(App.me.user.email)}</span></div></div>`;
+}
+const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.body.appendChild(s); });
+App.boot = async () => {
+  const t = lsGet('dh.theme'); if (t) document.documentElement.setAttribute('data-theme', t);
+  try {
+    const m = await fetch('/api/mode', { credentials: 'same-origin' }).then(r => r.json());
+    App.single = !m.multi_merchant; App.product = m.product || App.product;
+    document.title = App.single ? 'DIGITAL HUB — Card Payments & Crypto Settlement' : 'Digital Hub Payments';
+    for (const s of App.single ? ['/app-console.js'] : ['/app-merchant.js', '/app-admin.js']) await loadScript(s);
+    await loadMe();
+  } catch (e) { $('#root').innerHTML = `<div class="auth-wrap">${note('danger', 'Cannot reach the server', esc(e.message))}</div>`; }
+};
+App.boot();

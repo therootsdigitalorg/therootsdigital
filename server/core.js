@@ -73,12 +73,14 @@ const kybReady = m => Object.values(m.kyb.checks).every(Boolean) && m.kyb.owners
   && require('./documents').requirements(m).complete; // every required document (owner IDs, company registration, proof of address) verified
 function liveReady(m) {
   if (!config.livePayments) return 'Live payments are switched off on this platform (LIVE_PAYMENTS=0).';
+  if (!config.multiMerchant) return store.getMeta('readiness', {}).cardsLive ? null : 'Live card payments have not been enabled on the Production Readiness page.';
   if (require('./chain').settings().platformMode !== 'live') return 'Base Mainnet is not switched on yet (Super Admin → Settings → MetaMask).';
   if (m.status !== 'approved') return 'Business verification is not approved.';
   if (!m.live_enabled) return 'Digital Hub has not activated live mode for this account.';
   return null;
 }
 function assertMode(m, mode) {
+  require('./business').assertBusiness(m);
   if (m.status === 'suspended' || m.status === 'rejected') throw new HttpError(403, 'account_inactive', `This account is ${m.status}.`);
   if (mode === 'live') { const why = liveReady(m); if (why) throw new HttpError(403, 'live_mode_unavailable', why); }
 }
@@ -88,6 +90,7 @@ function assertMode(m, mode) {
    sandbox crypto rails stay in the codebase but are switched off in chain settings (providers.*). */
 const METHODS = ['usdc', 'card', 'crypto'];
 function methodAvailable(m, mode, method) {
+  if (!config.multiMerchant) return method === 'card' && require('./cards').available(mode); // single-business: Authorize.Net Accept Hosted cards only
   const chain = require('./chain'), prov = chain.settings().providers;
   if (method === 'usdc') {
     if (!prov.metamask_usdc || !m.perms.crypto) return false;
@@ -181,6 +184,8 @@ function createSession(m, mode, input, actor = 'api') {
   methods.sort((a, b) => (a === 'card' ? -1 : 0) - (b === 'card' ? -1 : 0)); // card is offered first at checkout
   methods = methods.filter(x => methodAvailable(m, mode, x));
   if (currency !== 'USD' && methods.includes('usdc') && methods.some(x => x !== 'usdc')) methods = methods.filter(x => x !== 'usdc');
+  if (!config.multiMerchant && currency !== 'USD') throw bad('Card payments are processed in USD. Use currency USD.', 'currency_unsupported');
+  if (!methods.length && !config.multiMerchant) throw bad(require('./cards').unavailableReason(mode) || 'Card payments are not available.', 'no_payment_method');
   if (!methods.length) throw bad(mode === 'live' ? 'No payment method is available for this account in live mode yet.' : 'No payment method is available: verify a receiving wallet (Dashboard → Receiving wallet), or ask Digital Hub to enable test cards.', 'no_payment_method');
   if (methods.includes('usdc') && currency !== 'USD') throw bad('USDC checkout is priced in USD (1 USDC = 1 USD, no conversion). Use currency USD.', 'currency_unsupported');
   const block = controlCheck(m, mode, amount, currency, null); if (block) throw bad(block, 'limit_exceeded');
@@ -224,6 +229,7 @@ function sessionPayable(s) {
 }
 function cardPay(s, input) {
   return store.tx(() => {
+    if (!config.multiMerchant) throw new HttpError(409, 'card_unavailable', 'Cards are taken on the Authorize.Net secure payment page.');
     const m = merchant(s.merchant_id); assertMode(m, s.mode); sessionPayable(s);
     if (!s.methods.includes('card') || !methodAvailable(m, s.mode, 'card')) throw bad('Card payments are not available for this checkout.');
     if (s.mode !== 'test') throw bad('Live card processing is pending acquirer integration.', 'card_unavailable');

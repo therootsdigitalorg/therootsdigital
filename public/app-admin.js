@@ -417,4 +417,3 @@ ACT.editFeeWallet = () => formModal('Fee treasury wallet', 'feeWallet', note('in
 FORM.feeWallet = async f => { await api('PATCH', '/a-api/chain', f); closeModal(); toast('Fee wallet saved'); render(); };
 FORM.platform = async f => { const p = await api('GET', '/a-api/platform'), s = p.settings; await api('PATCH', '/a-api/platform', { risk: { declineCount: s.risk.declineCount, highValueUSD: toMinor(f.highValue) }, defaults: { ...s.defaults, cryptoPlatPct: +f.cryptoPlatPct }, strictKyb: !!f.strictKyb, ...(f.staffMfa === undefined ? {} : { staffMfa: !!f.staffMfa }) }); toast('Platform settings saved'); await loadMe(); };
 
-App.boot();

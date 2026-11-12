@@ -65,19 +65,33 @@ function routes(r) {
 
   get('/v1/payments', 'payments:read', (ctx, a) => listOf(store.list('payments', { merchant_id: a.m.id, mode: a.mode, ...(ctx.query.status ? { status: ctx.query.status } : {}) }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), core.publicPayment, lim(ctx.query)));
   get('/v1/payments/:id', 'payments:read', async (ctx, a) => core.publicPayment(await usdc.refreshPayment(owned('payments', ctx.params.id, a))));
-  post('/v1/payments/:id/capture', 'payments:write', (ctx, a) => core.publicPayment(core.capture(owned('payments', ctx.params.id, a), actor(a))));
-  post('/v1/payments/:id/cancel', 'payments:write', (ctx, a) => core.publicPayment(core.cancel(owned('payments', ctx.params.id, a), actor(a))));
+  const cards = require('../cards'), isAnet = p => p.provider === 'authorize_net';
+  post('/v1/payments/:id/capture', 'payments:write', async (ctx, a) => { const p = owned('payments', ctx.params.id, a); return core.publicPayment(isAnet(p) ? await cards.capture(p, ctx.body.amount == null ? null : Number(ctx.body.amount), actor(a)) : core.capture(p, actor(a))); });
+  post('/v1/payments/:id/cancel', 'payments:write', async (ctx, a) => { const p = owned('payments', ctx.params.id, a); return core.publicPayment(isAnet(p) ? await cards.voidPayment(p, actor(a)) : core.cancel(p, actor(a))); });
 
   /** USDC refunds are non-custodial: this creates a refund request (status requires_action). The merchant sends the USDC
       from the receiving wallet with MetaMask in the dashboard; the refund succeeds only when that transfer is verified on Base. */
   post('/v1/refunds', 'refunds:write', async (ctx, a) => {
     const p = owned('payments', ctx.body.payment, a), amount = ctx.body.amount == null ? null : Number(ctx.body.amount);
+    if (isAnet(p)) { const out = await cards.refund(p, amount, { actor: actor(a), reason: ctx.body.reason });
+      return out.refund ? core.publicRefund(out.refund) : { id: 'void_' + p.id, object: 'refund', livemode: p.mode === 'live', status: 'succeeded', payment: p.id, amount: p.captured, currency: p.currency, reason: 'voided before settlement', voided: true, created: Math.floor(Date.now() / 1000) }; }
     if (p.method === 'usdc') return usdc.publicRefund(await usdc.createRefund(p, amount, { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address || null }));
     return core.publicRefund(core.refund(p, amount, { actor: actor(a), reason: ctx.body.reason, address: ctx.body.address, network: ctx.body.network }));
   });
   const anyRefund = r => r.network ? usdc.publicRefund(r) : core.publicRefund(r);
   get('/v1/refunds', 'payments:read', (ctx, a) => listOf(store.list('refunds', { merchant_id: a.m.id, mode: a.mode }, { limit: lim(ctx.query) + 1, offset: offset(ctx.query) }), anyRefund, lim(ctx.query)));
   get('/v1/refunds/:id', 'payments:read', async (ctx, a) => anyRefund(await usdc.refreshRefund(owned('refunds', ctx.params.id, a))));
+
+  /* WooCommerce aliases (same API keys and scopes as /v1) */
+  post('/api/v1/woocommerce/checkout', 'checkout:write', (ctx, a) => core.publicSession(core.createSession(a.m, a.mode, { ...ctx.body, payment_methods: ['card'] }, actor(a))));
+  get('/api/v1/woocommerce/payment-status', 'checkout:read', async (ctx, a) => {
+    let s = ctx.query.session ? owned('checkout_sessions', String(ctx.query.session), a) : null;
+    if (!s && ctx.query.order_id) s = store.list('checkout_sessions', { merchant_id: a.m.id, mode: a.mode }, { limit: 5000 }).find(x => String(x.metadata?.order_id || '') === String(ctx.query.order_id));
+    if (!s) throw new HttpError(404, 'resource_missing', 'No checkout session for that session / order_id.');
+    let p = s.payment_id ? store.get('payments', s.payment_id) : null; if (p) p = await usdc.refreshPayment(p);
+    s = store.get('checkout_sessions', s.id);
+    return { session: core.publicSession(s), payment: p ? core.publicPayment(p) : null, statuses: p?.provider === 'authorize_net' ? cards.statuses(p) : null, paid: s.status === 'complete' };
+  });
 
   /* subscriptions — recurring invoices; saved sandbox cards are charged automatically */
   const SUB = require('../subscriptions');
